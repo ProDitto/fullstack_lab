@@ -4,7 +4,8 @@ import (
 	"context"
 
 	"chatterbox/internal/domain"
-	"github.comcom/google/uuid"
+
+	"github.com/google/uuid"
 )
 
 type MessageRepository interface {

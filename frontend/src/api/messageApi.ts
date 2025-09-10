@@ -1,4 +1,4 @@
-import type { PaginatedResponse, Message, MessageDTO } from '../types';
+import type { PaginatedResponse, MessageDTO } from '../types';
 import { api } from './client';
 
 export const getPendingMessages = async (cursor?: string): Promise<PaginatedResponse<MessageDTO>> => {
