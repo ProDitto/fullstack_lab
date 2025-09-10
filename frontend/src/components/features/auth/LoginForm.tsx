@@ -50,7 +50,7 @@ export const LoginForm = () => {
         {...register('password')}
         error={errors.password?.message}
         type="password"
-        placeholder="��������"
+        placeholder="********"
       />
       <div>
         <Button type="submit" className="w-full" disabled={isSubmitting}>
