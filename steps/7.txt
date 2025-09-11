@@ -121,7 +121,7 @@ export const stopWorldSimulation = () => {
 };
 
 // -- src/store/worldStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { OpenWorld, Player } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';

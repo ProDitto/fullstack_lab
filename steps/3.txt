@@ -92,7 +92,7 @@ export const getChatPartner = async (chat: Chat, currentUserId: string): Promise
 };
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat } from '../types';
 
 interface ChatState {

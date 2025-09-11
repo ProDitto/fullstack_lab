@@ -176,7 +176,7 @@ export const getChatPartner = async (chat: Chat, currentUserId: string): Promise
 };
 
 // -- src/store/friendStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { User, FriendRequest } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';

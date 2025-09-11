@@ -155,7 +155,7 @@ const App: React.FC = () => {
 export default App;
 
 // -- src/store/authStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { User } from '../types';
 import * as api from '../lib/api';
 
@@ -253,7 +253,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 }));
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat, Message } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -373,7 +373,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 }));
 
 // -- src/store/friendStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { User, FriendRequest } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -521,7 +521,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
 }));
 
 // -- src/store/worldStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { OpenWorld, Player, Message } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -634,7 +634,7 @@ export const useWorldStore = create<WorldState>((set, get) => ({
 }));
 
 // -- src/store/themeStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { ThemeConfig } from '../types';
 import * as api from '../lib/api';
 

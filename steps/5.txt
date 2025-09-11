@@ -136,7 +136,7 @@ export const useWebSocketSim = () => {
 };
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat, Message } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';

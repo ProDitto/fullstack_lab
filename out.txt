@@ -995,7 +995,7 @@ export const getUserById = async (userId: string): Promise<User | undefined> => 
 };
 
 // -- src/store/authStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { User } from '../types';
 import * as api from '../lib/api';
 
@@ -1591,7 +1591,7 @@ export const getChatPartner = async (chat: Chat, currentUserId: string): Promise
 };
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat } from '../types';
 
 interface ChatState {
@@ -1987,7 +1987,7 @@ export const markMessagesAsSeen = async (chatId: string, userId: string): Promis
 };
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat, Message } from '../types';
 import * as api from '../lib/api';
 
@@ -2568,7 +2568,7 @@ export const useWebSocketSim = () => {
 };
 
 // -- src/store/chatStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { Chat, Message } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -3000,7 +3000,7 @@ export const getChatPartner = async (chat: Chat, currentUserId: string): Promise
 };
 
 // -- src/store/friendStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { User, FriendRequest } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -3651,7 +3651,7 @@ export const stopWorldSimulation = () => {
 };
 
 // -- src/store/worldStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { OpenWorld, Player } from '../types';
 import * as api from '../lib/api';
 import { useAuthStore } from './authStore';
@@ -4185,7 +4185,7 @@ export const useWorldStore = create<WorldState>((set, get) => ({
 }));
 
 // -- src/store/themeStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { ThemeConfig } from '../types';
 import * as api from '../lib/api';
 

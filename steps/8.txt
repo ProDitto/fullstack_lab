@@ -125,7 +125,7 @@ export const useWorldStore = create<WorldState>((set, get) => ({
 }));
 
 // -- src/store/themeStore.ts
-import create from 'zustand';
+import { create } from 'zustand';
 import type { ThemeConfig } from '../types';
 import * as api from '../lib/api';
 
