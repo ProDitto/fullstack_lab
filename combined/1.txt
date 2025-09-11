@@ -1,0 +1,4832 @@
+// -- src/types/index.ts
+/**
+ * Defines the core data structures and types used throughout the QuikChat application.
+ * These types are designed to be consistent with the backend API specification.
+ */
+
+import type { Table } from 'dexie';
+
+// Represents the status of a message sent by the current user.
+export type MessageStatus = 'sent' | 'delivered' | 'seen';
+
+// Represents a user in the system.
+export interface User {
+  id: string; // UUID
+  email: string;
+  name: string;
+  avatar: string; // URL
+  isOnline: boolean;
+  createdAt: Date;
+  // For local simulation, storing password hash
+  passwordHash?: string;
+  friends: string[]; // Array of user IDs
+}
+
+// Represents a single message within a chat.
+export interface Message {
+  id: string; // UUID
+  chatId: string; // UUID of the chat it belongs to
+  senderId: string; // UUID of the user who sent it
+  content: string;
+  timestamp: Date;
+  isEvent: boolean; // True if it's a system event (e.g., "User joined")
+  status?: MessageStatus; // Only for messages sent by the current user
+}
+
+// Represents a chat conversation, which can be a 1-on-1 or a group chat.
+export interface Chat {
+  id: string; // UUID
+  name?: string; // Group chat name
+  avatar?: string; // Group chat avatar URL
+  isGroup: boolean;
+  creatorId?: string; // User ID of the group creator
+  participantIds: string[];
+  lastMessage?: Message;
+  unreadCount: number;
+}
+
+// Represents a friend request between two users.
+export interface FriendRequest {
+  id: string; // UUID
+  fromUserId: string;
+  toUserId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: Date;
+}
+
+// Represents an open world that users can join.
+export interface OpenWorld {
+  id: string; // e.g., "nexus-prime"
+  name: string;
+  description: string;
+  imageUrl: string;
+  population: number;
+  isPasswordProtected: boolean;
+  password?: string; // For simulation purposes
+}
+
+// Represents a player within an Open World.
+export interface Player {
+  id: string; // User ID
+  name: string;
+  avatar: string;
+  position: {
+    x: number;
+    y: number;
+  };
+}
+
+// Represents a user-created theme configuration.
+export interface ThemeConfig {
+  id: string; // UUID
+  name: string;
+  colors: {
+    background: {
+      primary: string;
+      secondary: string;
+    };
+    text: {
+      primary: string;
+      secondary: string;
+    };
+    border: string;
+    primary: {
+      accent: string;
+    };
+    secondary: {
+      accent: string;
+    };
+    status: {
+      success: string;
+      warning: string;
+      error: string;
+      info: string;
+    };
+  };
+}
+
+// Dexie table interfaces for type-safe database interactions.
+export interface QuikChatTables {
+  users: Table<User, string>;
+  chats: Table<Chat, string>;
+  messages: Table<Message, string>;
+  friendRequests: Table<FriendRequest, string>;
+  openWorlds: Table<OpenWorld, string>;
+  themes: Table<ThemeConfig, string>;
+}
+
+// -- src/lib/utils.ts
+import { type ClassValue, clsx } from "clsx"
+import { twMerge } from "tailwind-merge"
+import { formatDistanceToNowStrict } from 'date-fns';
+
+/**
+ * A utility function to merge Tailwind CSS classes conditionally.
+ * It combines the functionalities of `clsx` and `tailwind-merge`.
+ * @param inputs - A list of class values (strings, objects, arrays).
+ * @returns A string of merged Tailwind CSS classes.
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+/**
+ * Formats a given date into a human-readable "time ago" string.
+ * e.g., "5s", "1m", "3h", "3d"
+ * @param date - The date to format.
+ * @returns A string representing the time elapsed since the date.
+ */
+export function timeAgo(date: Date): string {
+    return formatDistanceToNowStrict(date, { addSuffix: false })
+      .replace(/about /g, '')
+      .replace(/ seconds?/g, 's')
+      .replace(/ minutes?/g, 'm')
+      .replace(/ hours?/g, 'h')
+      .replace(/ days?/g, 'd')
+      .replace(/ months?/g, 'mo')
+      .replace(/ years?/g, 'y');
+}
+
+
+// -- src/lib/db.ts
+import Dexie from 'dexie';
+import { v4 as uuidv4 } from 'uuid';
+import type { QuikChatTables, User, Chat, Message, FriendRequest, OpenWorld, ThemeConfig } from '../types';
+
+/**
+ * Dexie-based database class for QuikChat.
+ * This class manages all local IndexedDB storage, acting as a simulated backend.
+ * It defines tables for users, chats, messages, and other application data.
+ */
+export class QuikChatDB extends Dexie {
+  users!: QuikChatTables['users'];
+  chats!: QuikChatTables['chats'];
+  messages!: QuikChatTables['messages'];
+  friendRequests!: QuikChatTables['friendRequests'];
+  openWorlds!: QuikChatTables['openWorlds'];
+  themes!: QuikChatTables['themes'];
+
+  constructor() {
+    super('QuikChatDB');
+    this.version(1).stores({
+      users: 'id, email, name',
+      chats: 'id, *participantIds', // Indexed on participantIds for quick lookup
+      messages: 'id, chatId, timestamp', // Indexed on chatId and timestamp for pagination
+      friendRequests: 'id, fromUserId, toUserId',
+      openWorlds: 'id',
+      themes: 'id, name',
+    });
+  }
+}
+
+export const db = new QuikChatDB();
+
+/**
+ * Seeds the database with initial mock data if it's empty.
+ * This function creates a set of users, chats, and messages to provide a realistic
+ * starting point for the application.
+ */
+export const seedDatabase = async () => {
+  const userCount = await db.users.count();
+  if (userCount > 0) {
+    console.log('Database already seeded.');
+    return;
+  }
+  console.log('Seeding database...');
+
+  // 1. Create Mock Users
+  const usersToCreate: Omit<User, 'id' | 'createdAt' | 'friends' | 'isOnline'>[] = [
+    { name: 'Alice', email: 'alice@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=alice' },
+    { name: 'Bob', email: 'bob@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=bob' },
+    { name: 'Charlie', email: 'charlie@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=charlie' },
+    { name: 'Diana', email: 'diana@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=diana' },
+    { name: 'Eve', email: 'eve@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=eve' },
+    { name: 'Frank', email: 'frank@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=frank' },
+    { name: 'Grace', email: 'grace@quikchat.dev', passwordHash: 'password', avatar: 'https://i.pravatar.cc/150?u=grace' },
+  ];
+
+  const createdUsers = await Promise.all(
+    usersToCreate.map(async (u) => {
+      const user: User = {
+        ...u,
+        id: uuidv4(),
+        createdAt: new Date(),
+        isOnline: Math.random() > 0.5,
+        friends: [],
+      };
+      await db.users.add(user);
+      return user;
+    })
+  );
+
+  const [alice, bob, charlie, diana, eve, frank, grace] = createdUsers;
+
+  // Make everyone friends with each other (except for specific cases for friend requests)
+  for (const user of createdUsers) {
+    user.friends = createdUsers.filter(u => u.id !== user.id).map(u => u.id);
+    await db.users.update(user.id, { friends: user.friends });
+  }
+
+  // 2. Create Chats and Messages
+  const now = Date.now();
+
+  // Chat between Alice and Bob
+  const chatAliceBobId = uuidv4();
+  const messagesAliceBob: Message[] = [
+    { id: uuidv4(), chatId: chatAliceBobId, senderId: alice.id, content: 'Hey Bob, how are you?', timestamp: new Date(now - 1000 * 60 * 5), isEvent: false, status: 'seen' },
+    { id: uuidv4(), chatId: chatAliceBobId, senderId: bob.id, content: 'Doing great, Alice! Just working on the new project. How about you?', timestamp: new Date(now - 1000 * 60 * 4), isEvent: false },
+    { id: uuidv4(), chatId: chatAliceBobId, senderId: alice.id, content: 'Same here. It\'s going well!', timestamp: new Date(now - 1000 * 60 * 3), isEvent: false, status: 'delivered' },
+  ];
+  const chatAliceBob: Chat = {
+    id: chatAliceBobId,
+    isGroup: false,
+    participantIds: [alice.id, bob.id],
+    lastMessage: messagesAliceBob[messagesAliceBob.length - 1],
+    unreadCount: 1, // Bob has 1 unread from Alice
+  };
+
+  // Chat between Alice and Charlie
+  const chatAliceCharlieId = uuidv4();
+  const messagesAliceCharlie: Message[] = [
+    { id: uuidv4(), chatId: chatAliceCharlieId, senderId: charlie.id, content: 'Hey, did you see the latest design mockups?', timestamp: new Date(now - 1000 * 60 * 30), isEvent: false },
+    { id: uuidv4(), chatId: chatAliceCharlieId, senderId: alice.id, content: 'Oh, not yet! Sending them over?', timestamp: new Date(now - 1000 * 60 * 29), isEvent: false, status: 'sent' },
+  ];
+  const chatAliceCharlie: Chat = {
+    id: chatAliceCharlieId,
+    isGroup: false,
+    participantIds: [alice.id, charlie.id],
+    lastMessage: messagesAliceCharlie[messagesAliceCharlie.length - 1],
+    unreadCount: 0,
+  };
+
+  // Group Chat: "Project Phoenix" (Alice, Bob, Charlie, Diana)
+  const chatPhoenixGroupId = uuidv4();
+  const messagesPhoenixGroup: Message[] = [
+    { id: uuidv4(), chatId: chatPhoenixGroupId, senderId: diana.id, content: 'Welcome to the Project Phoenix group chat!', timestamp: new Date(now - 1000 * 60 * 120), isEvent: false },
+    { id: uuidv4(), chatId: chatPhoenixGroupId, senderId: alice.id, content: 'Glad to be here!', timestamp: new Date(now - 1000 * 60 * 119), isEvent: false, status: 'seen' },
+    { id: uuidv4(), chatId: chatPhoenixGroupId, senderId: bob.id, content: 'Let\'s get this done! 💪', timestamp: new Date(now - 1000 * 60 * 118), isEvent: false },
+    { id: uuidv4(), chatId: chatPhoenixGroupId, senderId: 'system', content: `${charlie.name} was added to the group.`, timestamp: new Date(now - 1000 * 60 * 60), isEvent: true },
+    { id: uuidv4(), chatId: chatPhoenixGroupId, senderId: charlie.id, content: 'Hey everyone!', timestamp: new Date(now - 1000 * 60 * 59), isEvent: false },
+  ];
+  const chatPhoenixGroup: Chat = {
+    id: chatPhoenixGroupId,
+    isGroup: true,
+    name: 'Project Phoenix',
+    avatar: 'https://i.pravatar.cc/150?u=group-phoenix',
+    creatorId: diana.id,
+    participantIds: [alice.id, bob.id, charlie.id, diana.id],
+    lastMessage: messagesPhoenixGroup[messagesPhoenixGroup.length - 1],
+    unreadCount: 2, // 2 unread messages for Alice
+  };
+  
+  // Chat between Alice and Eve (Alice has a pending friend request from Eve, they are friends in the DB for now)
+  const chatAliceEveId = uuidv4();
+  const messagesAliceEve: Message[] = [
+      { id: uuidv4(), chatId: chatAliceEveId, senderId: eve.id, content: 'Hi Alice, remember me?', timestamp: new Date(now - 1000 * 60 * 15), isEvent: false },
+      { id: uuidv4(), chatId: chatAliceEveId, senderId: alice.id, content: 'Hey Eve! Long time no see. How are you?', timestamp: new Date(now - 1000 * 60 * 14), isEvent: false, status: 'sent' },
+  ];
+  const chatAliceEve: Chat = {
+      id: chatAliceEveId,
+      isGroup: false,
+      participantIds: [alice.id, eve.id],
+      lastMessage: messagesAliceEve[messagesAliceEve.length - 1],
+      unreadCount: 0,
+  };
+
+
+  await db.chats.bulkAdd([chatAliceBob, chatAliceCharlie, chatPhoenixGroup, chatAliceEve]);
+  await db.messages.bulkAdd([...messagesAliceBob, ...messagesAliceCharlie, ...messagesPhoenixGroup, ...messagesAliceEve]);
+  
+  // 3. Create Friend Requests
+  // Friend request for Alice from Frank (Alice and Frank are not friends yet)
+  // First, remove Frank from Alice's friends and vice versa
+  alice.friends = alice.friends.filter(id => id !== frank.id);
+  frank.friends = frank.friends.filter(id => id !== alice.id);
+  await db.users.update(alice.id, { friends: alice.friends });
+  await db.users.update(frank.id, { friends: frank.friends });
+
+  const friendRequestAliceFrank: FriendRequest = {
+    id: uuidv4(),
+    fromUserId: frank.id,
+    toUserId: alice.id,
+    status: 'pending',
+    createdAt: new Date(now - 1000 * 60 * 60 * 24), // 1 day ago
+  };
+  await db.friendRequests.add(friendRequestAliceFrank);
+
+  // 4. Create Open Worlds
+  const worlds: OpenWorld[] = [
+    { id: 'nexus-prime', name: 'Nexus Prime', description: 'The central hub for all travelers. A bustling city of light and technology.', imageUrl: 'https://picsum.photos/seed/nexus/400/300', population: 137, isPasswordProtected: false },
+    { id: 'serene-valley', name: 'Serene Valley', description: 'A peaceful world of lush forests and tranquil rivers. Perfect for relaxation.', imageUrl: 'https://picsum.photos/seed/serene/400/300', population: 42, isPasswordProtected: false },
+    { id: 'cyber-abyss', name: 'Cyber Abyss', description: 'A high-stakes, neon-drenched world. Only for the brave and skilled.', imageUrl: 'https://picsum.photos/seed/cyber/400/300', population: 88, isPasswordProtected: true, password: 'password123' },
+  ];
+  await db.openWorlds.bulkAdd(worlds);
+
+  // 5. Seed default themes
+  const defaultThemes: ThemeConfig[] = [
+      {
+          id: 'light',
+          name: 'Light (Default)',
+          colors: {
+              background: { primary: '#ffffff', secondary: '#f1f5f9' },
+              text: { primary: '#020817', secondary: '#64748b' },
+              border: '#e2e8f0',
+              primary: { accent: '#2563eb' },
+              secondary: { accent: '#475569' },
+              status: { success: '#22c55e', warning: '#f97316', error: '#ef4444', info: '#3b82f6' },
+          },
+      },
+      {
+          id: 'dark',
+          name: 'Dark',
+          colors: {
+              background: { primary: '#18181b', secondary: '#27272a' },
+              text: { primary: '#fafafa', secondary: '#a1a1aa' },
+              border: '#3f3f46',
+              primary: { accent: '#60a5fa' },
+              secondary: { accent: '#a1a1aa' },
+              status: { success: '#4ade80', warning: '#fcd34d', error: '#f87171', info: '#60a5fa' },
+          },
+      },
+  ];
+  await db.themes.bulkAdd(defaultThemes);
+
+
+  console.log('Database seeding complete.');
+};
+
+
+// -- src/lib/api.ts
+import { db } from './db';
+import type { Chat, FriendRequest, Message, User, OpenWorld, ThemeConfig } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+
+/**
+ * Simulates network delay.
+ * @param ms - The number of milliseconds to wait.
+ */
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- AUTHENTICATION API ---
+
+/**
+ * Simulates user registration.
+ * @param name - The user's name.
+ * @param email - The user's email.
+ * @param password - The user's password.
+ * @returns The newly created user object.
+ * @throws An error if the email is already in use.
+ */
+export const register = async (name: string, email: string, password: string): Promise<User> => {
+  await wait(1000); // Simulate network latency
+
+  const existingUser = await db.users.where('email').equals(email).first();
+  if (existingUser) {
+    throw new Error('Email already in use.');
+  }
+
+  const newUser: User = {
+    id: uuidv4(),
+    name,
+    email,
+    passwordHash: password, // In a real app, this would be a securely generated hash.
+    avatar: `https://i.pravatar.cc/150?u=${uuidv4()}`,
+    isOnline: true,
+    createdAt: new Date(),
+    friends: [],
+  };
+
+  await db.users.add(newUser);
+  return newUser;
+};
+
+/**
+ * Simulates user login.
+ * @param email - The user's email.
+ * @param password - The user's password.
+ * @returns The authenticated user object.
+ * @throws An error if the credentials are invalid.
+ */
+export const login = async (email: string, password: string): Promise<User> => {
+  await wait(1000); // Simulate network latency
+
+  const user = await db.users.where('email').equals(email).first();
+
+  if (!user || user.passwordHash !== password) {
+    throw new Error('Invalid email or password.');
+  }
+
+  // Set user to online
+  await db.users.update(user.id, { isOnline: true });
+  return { ...user, isOnline: true };
+};
+
+/**
+ * Simulates a quick login for pre-seeded mock users.
+ * @param userId - The ID of the user to log in.
+ * @returns The authenticated user object.
+ * @throws An error if the user is not found.
+ */
+export const quickLogin = async (userId: string): Promise<User> => {
+  await wait(500); // Faster login for quick login
+
+  const user = await db.users.get(userId);
+  if (!user) {
+    throw new Error('User not found.');
+  }
+  
+  // Set user to online
+  await db.users.update(user.id, { isOnline: true });
+  return { ...user, isOnline: true };
+};
+
+/**
+ * Simulates user logout.
+ * @param userId - The ID of the user logging out.
+ */
+export const logout = async (userId: string): Promise<void> => {
+    await wait(500);
+    // Set user to offline
+    if (userId) {
+        await db.users.update(userId, { isOnline: false });
+    }
+    return;
+};
+
+
+/**
+ * Fetches a user profile by ID.
+ * @param userId The ID of the user to fetch.
+ * @returns The user object.
+ */
+export const getUserById = async (userId: string): Promise<User | undefined> => {
+    await wait(300);
+    return db.users.get(userId);
+};
+
+
+// --- CHAT API ---
+
+/**
+ * Fetches all chats for a given user.
+ * @param userId - The ID of the user.
+ * @returns A promise that resolves to an array of chats, sorted by the most recent message.
+ */
+export const getChatsForUser = async (userId: string): Promise<Chat[]> => {
+    await wait(700); // Simulate network delay
+    const chats = await db.chats.where('participantIds').equals(userId).toArray();
+    
+    // Sort by last message timestamp, descending
+    return chats.sort((a, b) => {
+        const timeA = a.lastMessage?.timestamp.getTime() || 0;
+        const timeB = b.lastMessage?.timestamp.getTime() || 0;
+        return timeB - timeA;
+    });
+};
+
+/**
+ * Gets the "partner" user in a 1-on-1 chat.
+ * @param chat - The chat object.
+ * @param currentUserId - The ID of the currently logged-in user.
+ * @returns The other participant's user object, or undefined if not found or it's a group chat.
+ */
+export const getChatPartner = async (chat: Chat, currentUserId: string): Promise<User | undefined> => {
+    if (chat.isGroup) return undefined;
+    const partnerId = chat.participantIds.find(id => id !== currentUserId);
+    if (!partnerId) return undefined;
+    return await db.users.get(partnerId);
+};
+
+/**
+ * Fetches messages for a specific chat with cursor-based pagination.
+ * @param chatId - The ID of the chat.
+ * @param limit - The number of messages to fetch.
+ * @param cursor - The timestamp of the last message from the previous fetch (for pagination).
+ * @returns An object containing the fetched messages and the next cursor.
+ */
+export const getMessagesForChat = async (chatId: string, limit = 50, cursor?: number): Promise<{ messages: Message[], nextCursor: number | null }> => {
+    await wait(500); // Simulate network delay
+
+    let collection = db.messages
+        .where('chatId').equals(chatId)
+        .reverse(); // Newest first
+
+    if (cursor) {
+        collection = collection.and(msg => msg.timestamp.getTime() < cursor);
+    }
+
+    const messages = await collection.limit(limit).toArray();
+    
+    const nextCursor = messages.length === limit
+        ? messages[messages.length - 1].timestamp.getTime()
+        : null;
+
+    return { messages: messages.reverse(), nextCursor }; // Oldest first for display
+};
+
+/**
+ * Sends a new message to a chat.
+ * @param chatId - The ID of the chat.
+ * @param senderId - The ID of the user sending the message.
+ * @param content - The text content of the message.
+ * @returns The newly created message object.
+ */
+export const sendMessage = async (chatId: string, senderId: string, content: string): Promise<Message> => {
+    await wait(300); // Simulate sending delay
+    
+    const newMessage: Message = {
+        id: uuidv4(),
+        chatId,
+        senderId,
+        content,
+        timestamp: new Date(),
+        isEvent: false,
+        status: 'sent', // Initial status
+    };
+
+    await db.transaction('rw', db.messages, db.chats, async () => {
+        await db.messages.add(newMessage);
+        // Update the lastMessage in the chat
+        const chat = await db.chats.get(chatId);
+        if (chat) {
+            await db.chats.update(chatId, { lastMessage: newMessage });
+        }
+    });
+
+    return newMessage;
+};
+
+/**
+ * Marks all messages in a chat as "seen" for a specific user and resets unread count.
+ * @param chatId - The ID of the chat.
+ * @param userId - The ID of the user who has seen the messages (used for filtering in a real backend).
+ */
+export const markMessagesAsSeen = async (chatId: string, userId: string): Promise<void> => {
+    await wait(100);
+    
+    // For local simulation, simply reset the unread count for the chat.
+    // In a real backend, this would involve updating message statuses in a more granular way.
+    await db.chats.update(chatId, { unreadCount: 0 });
+};
+
+/**
+ * Fetches a chat by its ID.
+ * @param chatId - The ID of the chat.
+ * @returns The chat object, or undefined if not found.
+ */
+export const getChatById = async (chatId: string): Promise<Chat | undefined> => {
+    return db.chats.get(chatId);
+};
+
+// --- FRIEND & GROUP API ---
+
+/**
+ * Searches for users by name.
+ * @param query - The search query.
+ * @param currentUserId - The ID of the current user, to exclude them from results.
+ * @returns A promise that resolves to an array of matching user objects.
+ */
+export const searchUsers = async (query: string, currentUserId: string): Promise<User[]> => {
+    await wait(400);
+    if (!query) return [];
+    return db.users
+        .where('name').startsWithIgnoreCase(query)
+        .filter(user => user.id !== currentUserId)
+        .limit(10)
+        .toArray();
+};
+
+/**
+ * Sends a friend request from one user to another.
+ * @param fromUserId - The ID of the user sending the request.
+ * @param toUserId - The ID of the user receiving the request.
+ * @returns The newly created friend request object.
+ * @throws An error if a request already exists or users are already friends.
+ */
+export const sendFriendRequest = async (fromUserId: string, toUserId: string): Promise<FriendRequest> => {
+    await wait(500);
+    
+    // Check for existing request or friendship
+    const existingRequest = await db.friendRequests
+        .where({ fromUserId, toUserId, status: 'pending' })
+        .or('fromUserId').equals(toUserId).and(fr => fr.toUserId === fromUserId && fr.status === 'pending')
+        .first();
+
+    if (existingRequest) throw new Error("A pending friend request already exists with this user.");
+
+    const user = await db.users.get(fromUserId);
+    if (user?.friends.includes(toUserId)) throw new Error("You are already friends with this user.");
+
+
+    const newRequest: FriendRequest = { id: uuidv4(), fromUserId, toUserId, status: 'pending', createdAt: new Date() };
+    await db.friendRequests.add(newRequest);
+    return newRequest;
+};
+
+/**
+ * Fetches all pending friend requests for a given user.
+ * @param toUserId - The ID of the user to fetch requests for.
+ * @returns A promise that resolves to an array of pending friend request objects.
+ */
+export const getFriendRequests = async (toUserId: string): Promise<FriendRequest[]> => {
+    await wait(300);
+    return db.friendRequests.where({ toUserId, status: 'pending' }).toArray();
+};
+
+/**
+ * Updates the status of a friend request (accept or reject).
+ * If accepted, it also establishes a friendship between the users.
+ * @param requestId - The ID of the friend request to update.
+ * @param status - The new status ('accepted' or 'rejected').
+ * @throws An error if the request is not found or users cannot be updated.
+ */
+export const updateFriendRequestStatus = async (requestId: string, status: 'accepted' | 'rejected'): Promise<void> => {
+    await wait(600);
+    await db.transaction('rw', db.friendRequests, db.users, async () => {
+        const request = await db.friendRequests.get(requestId);
+        if (!request) throw new Error("Friend request not found.");
+
+        await db.friendRequests.update(requestId, { status });
+
+        if (status === 'accepted') {
+            const { fromUserId, toUserId } = request;
+            
+            const fromUser = await db.users.get(fromUserId);
+            const toUser = await db.users.get(toUserId);
+
+            if (!fromUser || !toUser) throw new Error("Users involved in the request not found.");
+
+            // Add each other to their friends lists if not already present
+            if (!fromUser.friends.includes(toUserId)) {
+                await db.users.update(fromUserId, { friends: [...fromUser.friends, toUserId] });
+            }
+            if (!toUser.friends.includes(fromUserId)) {
+                await db.users.update(toUserId, { friends: [...toUser.friends, fromUserId] });
+            }
+        }
+    });
+};
+
+/**
+ * Fetches the list of friends for a given user.
+ * @param userId - The ID of the user.
+ * @returns A promise that resolves to an array of friend user objects.
+ */
+export const getFriends = async (userId: string): Promise<User[]> => {
+    await wait(300);
+    const user = await db.users.get(userId);
+    if (!user || !user.friends.length) return [];
+    return db.users.where('id').anyOf(user.friends).toArray();
+};
+
+/**
+ * Removes a friendship between two users.
+ * @param userId - The ID of the current user.
+ * @param friendId - The ID of the friend to remove.
+ * @throws An error if user(s) are not found.
+ */
+export const removeFriend = async (userId: string, friendId: string): Promise<void> => {
+    await wait(600);
+    await db.transaction('rw', db.users, async () => {
+        const user = await db.users.get(userId);
+        const friend = await db.users.get(friendId);
+        if (!user || !friend) throw new Error("User or friend not found.");
+
+        await db.users.update(userId, { friends: user.friends.filter(id => id !== friendId) });
+        await db.users.update(friendId, { friends: friend.friends.filter(id => id !== userId) });
+    });
+};
+
+/**
+ * Creates a new chat, either 1-on-1 or a group chat.
+ * @param participantIds - IDs of other participants (excluding currentUserId).
+ * @param currentUserId - The ID of the user initiating the chat.
+ * @param groupName - Optional name for a group chat.
+ * @returns The newly created or existing chat object.
+ */
+export const createChat = async (participantIds: string[], currentUserId: string, groupName?: string): Promise<Chat> => {
+    await wait(800);
+    const allParticipantIds = [...new Set([currentUserId, ...participantIds])].sort(); // Ensure consistent order
+
+    const isGroup = allParticipantIds.length > 2 || !!groupName; // If groupName is provided, it's a group chat even with 2 people.
+
+    // For 1-on-1 chats, check if a chat already exists
+    if (!isGroup) {
+        const existingChat = await db.chats.filter(chat => 
+            !chat.isGroup &&
+            chat.participantIds.length === 2 &&
+            chat.participantIds.includes(allParticipantIds[0]) &&
+            chat.participantIds.includes(allParticipantIds[1])
+        ).first();
+        if (existingChat) return existingChat;
+    }
+    
+    const currentUser = await db.users.get(currentUserId);
+    const initialMessageContent = isGroup 
+        ? `${currentUser?.name || 'A user'} created the group "${groupName || 'New Group'}".` 
+        : "Chat started.";
+    
+    const initialMessage: Message = {
+        id: uuidv4(),
+        chatId: '', // Will be set below
+        senderId: 'system',
+        content: initialMessageContent,
+        timestamp: new Date(),
+        isEvent: true
+    };
+    
+    const newChat: Chat = {
+        id: uuidv4(),
+        isGroup,
+        participantIds: allParticipantIds,
+        unreadCount: 0,
+        lastMessage: initialMessage // Temporarily assign
+    };
+    
+    if (isGroup) {
+        newChat.name = groupName || 'New Group';
+        newChat.creatorId = currentUserId;
+        newChat.avatar = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(newChat.name)}`; // Generated avatar
+    }
+
+    initialMessage.chatId = newChat.id; // Assign actual chat ID
+
+    await db.transaction('rw', db.chats, db.messages, async () => {
+        await db.chats.add(newChat);
+        await db.messages.add(initialMessage);
+        // Update lastMessage on the chat itself now that message has its chatId
+        await db.chats.update(newChat.id, { lastMessage: initialMessage });
+    });
+
+    return newChat;
+};
+
+/**
+ * Adds a member to a group chat.
+ * @param chatId - The ID of the group chat.
+ * @param userId - The ID of the user to add.
+ */
+export const addGroupMember = async (chatId: string, userId: string): Promise<void> => {
+    await wait(500);
+    const chat = await db.chats.get(chatId);
+    if (!chat || !chat.isGroup) throw new Error("Chat not found or not a group chat.");
+    if (chat.participantIds.includes(userId)) throw new Error("User is already a member.");
+
+    await db.chats.update(chatId, { participantIds: [...chat.participantIds, userId] });
+
+    // Add system message
+    const addedUser = await db.users.get(userId);
+    if (addedUser) {
+        const systemMessage: Message = {
+            id: uuidv4(),
+            chatId: chatId,
+            senderId: 'system',
+            content: `${addedUser.name} was added to the group.`,
+            timestamp: new Date(),
+            isEvent: true,
+        };
+        await db.messages.add(systemMessage);
+        await db.chats.update(chatId, { lastMessage: systemMessage });
+    }
+};
+
+/**
+ * Removes a member from a group chat.
+ * @param chatId - The ID of the group chat.
+ * @param userId - The ID of the user to remove.
+ * @param removerId - The ID of the user performing the removal (for permission checks).
+ */
+export const removeGroupMember = async (chatId: string, userId: string, removerId: string): Promise<void> => {
+    await wait(500);
+    const chat = await db.chats.get(chatId);
+    if (!chat || !chat.isGroup) throw new Error("Chat not found or not a group chat.");
+    if (!chat.participantIds.includes(userId)) throw new Error("User is not a member of this group.");
+    if (chat.creatorId !== removerId && userId !== removerId) throw new Error("Only the group creator can remove others.");
+    if (chat.creatorId === userId && chat.participantIds.length > 1 && removerId === userId) throw new Error("Group creator cannot remove themselves without transferring ownership first, or being the last member.");
+
+    const newParticipants = chat.participantIds.filter(id => id !== userId);
+    await db.chats.update(chatId, { participantIds: newParticipants });
+
+    // Add system message
+    const removedUser = await db.users.get(userId);
+    if (removedUser) {
+        const systemMessage: Message = {
+            id: uuidv4(),
+            chatId: chatId,
+            senderId: 'system',
+            content: `${removedUser.name} was removed from the group.`,
+            timestamp: new Date(),
+            isEvent: true,
+        };
+        await db.messages.add(systemMessage);
+        await db.chats.update(chatId, { lastMessage: systemMessage });
+    }
+};
+
+/**
+ * Allows a user to leave a group chat.
+ * @param chatId - The ID of the group chat.
+ * @param userId - The ID of the user leaving.
+ * @throws An error if the user is the sole creator of the group.
+ */
+export const leaveGroup = async (chatId: string, userId: string): Promise<void> => {
+    await wait(500);
+    const chat = await db.chats.get(chatId);
+    if (!chat || !chat.isGroup) throw new Error("Chat not found or not a group chat.");
+    if (!chat.participantIds.includes(userId)) throw new Error("You are not a member of this group.");
+
+    if (chat.creatorId === userId && chat.participantIds.length > 1) {
+        throw new Error("As the group creator, you must transfer ownership before leaving or be the last member.");
+    }
+
+    const newParticipants = chat.participantIds.filter(id => id !== userId);
+    await db.chats.update(chatId, { participantIds: newParticipants });
+
+    // If no participants left, delete the chat
+    if (newParticipants.length === 0) {
+        await db.chats.delete(chatId);
+        // Optionally delete all messages related to this chat
+        await db.messages.where('chatId').equals(chatId).delete();
+    } else {
+        // Add system message
+        const leavingUser = await db.users.get(userId);
+        if (leavingUser) {
+            const systemMessage: Message = {
+                id: uuidv4(),
+                chatId: chatId,
+                senderId: 'system',
+                content: `${leavingUser.name} has left the group.`,
+                timestamp: new Date(),
+                isEvent: true,
+            };
+            await db.messages.add(systemMessage);
+            await db.chats.update(chatId, { lastMessage: systemMessage });
+        }
+        // If the creator left, assign new creator (simplistic, just first remaining member)
+        if (chat.creatorId === userId && newParticipants.length > 0) {
+            await db.chats.update(chatId, { creatorId: newParticipants[0] });
+        }
+    }
+};
+
+/**
+ * Transfers ownership of a group chat to another member.
+ * @param chatId - The ID of the group chat.
+ * @param newOwnerId - The ID of the new owner.
+ * @param currentOwnerId - The ID of the current owner (for permission checks).
+ */
+export const updateGroupChat = async (chatId: string, updates: { name?: string; avatar?: string; creatorId?: string }, currentOwnerId: string): Promise<void> => {
+    await wait(500);
+    const chat = await db.chats.get(chatId);
+    if (!chat || !chat.isGroup) throw new Error("Chat not found or not a group chat.");
+    if (chat.creatorId !== currentOwnerId) throw new Error("Only the group creator can update group settings or transfer ownership.");
+
+    if (updates.creatorId && !chat.participantIds.includes(updates.creatorId)) {
+        throw new Error("New owner must be a participant in the group.");
+    }
+
+    await db.chats.update(chatId, updates);
+
+    // Add system message for ownership transfer
+    if (updates.creatorId && updates.creatorId !== currentOwnerId) {
+        const newOwnerUser = await db.users.get(updates.creatorId);
+        const oldOwnerUser = await db.users.get(currentOwnerId);
+        if (newOwnerUser && oldOwnerUser) {
+            const systemMessage: Message = {
+                id: uuidv4(),
+                chatId: chatId,
+                senderId: 'system',
+                content: `${oldOwnerUser.name} transferred ownership to ${newOwnerUser.name}.`,
+                timestamp: new Date(),
+                isEvent: true,
+            };
+            await db.messages.add(systemMessage);
+            await db.chats.update(chatId, { lastMessage: systemMessage });
+        }
+    }
+};
+
+
+// --- OPEN WORLD API ---
+
+/**
+ * Fetches all available open worlds from the database.
+ * @returns A promise that resolves to an array of OpenWorld objects.
+ */
+export const getOpenWorlds = async (): Promise<OpenWorld[]> => {
+    await wait(800); // Simulate network delay
+    return db.openWorlds.toArray();
+};
+
+/**
+ * Simulates joining a world, validating the password if required.
+ * @param worldId - The ID of the world to join.
+ * @param password - The password provided by the user (if any).
+ * @returns The joined OpenWorld object.
+ * @throws An error if the world is not found or the password is incorrect.
+ */
+export const joinWorld = async (worldId: string, password?: string): Promise<OpenWorld> => {
+    await wait(1000); // Simulate joining delay
+    const world = await db.openWorlds.get(worldId);
+
+    if (!world) {
+        throw new Error("World not found.");
+    }
+
+    if (world.isPasswordProtected && world.password !== password) {
+        throw new Error("Invalid password.");
+    }
+
+    return world;
+};
+
+/**
+ * Sends a message to an open world chat.
+ * For simplicity, we'll reuse the Message model and add it to the DB.
+ * The chatId will be the worldId.
+ * @param worldId - The ID of the world the message is sent in.
+ * @param senderId - The ID of the user sending the message.
+ * @param content - The message content.
+ * @returns The new message object.
+ */
+export const sendWorldMessage = async (worldId: string, senderId: string, content: string): Promise<Message> => {
+    await wait(200);
+    const newMessage: Message = {
+        id: uuidv4(),
+        chatId: worldId, // Using worldId as chatId
+        senderId,
+        content,
+        timestamp: new Date(),
+        isEvent: false,
+    };
+    await db.messages.add(newMessage);
+    return newMessage;
+};
+
+// --- THEME API ---
+
+/**
+ * Fetches all saved custom themes from the database.
+ */
+export const getThemes = async (): Promise<ThemeConfig[]> => {
+    await wait(300);
+    return db.themes.toArray();
+};
+
+/**
+ * Saves a new custom theme to the database.
+ */
+export const saveTheme = async (theme: Omit<ThemeConfig, 'id'>): Promise<ThemeConfig> => {
+    await wait(500);
+    const newTheme = { ...theme, id: uuidv4() };
+    await db.themes.add(newTheme);
+    return newTheme;
+};
+
+// -- src/lib/simulation.ts
+import { db } from './db';
+import type { Message, User, Chat, Player } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+
+let chatSimulationInterval: NodeJS.Timeout | null = null;
+let worldSimulationInterval: NodeJS.Timeout | null = null;
+
+const MOCK_MESSAGES = [
+    "Hey, do you have a minute to chat?",
+    "Just saw your message, I'll get back to you shortly.",
+    "That sounds great! Let's do it.",
+    "Can you send me the file?",
+    "I'm running a bit late, sorry!",
+    "Let's sync up tomorrow morning.",
+    "👍",
+    "😂",
+    "Got it, thanks!",
+];
+
+const WORLD_MOCK_MESSAGES = [
+    "Hello everyone!", "Nice place.", "Anyone seen the hidden waterfall?", "Lagging a bit.", "This is cool!",
+    "Just exploring around here.", "What's up, world?", "Any events happening soon?", "Wish I had more gold."
+];
+
+/**
+ * Starts the real-time chat simulation.
+ * This function sets up an interval to perform two main actions:
+ * 1. Simulate a mock user sending a new message to a chat the current user is in.
+ * 2. Simulate message status updates (delivered, seen) for messages sent by the current user.
+ * 
+ * @param currentUserId - The ID of the currently logged-in user.
+ */
+export const startChatSimulation = (currentUserId: string) => {
+    if (chatSimulationInterval) {
+        console.log("Chat simulation already running.");
+        return;
+    }
+
+    console.log("Starting chat simulation...");
+
+    chatSimulationInterval = setInterval(async () => {
+        try {
+            // Action 1: Simulate a new incoming message from a mock user
+            if (Math.random() < 0.3) { // 30% chance to send a message each interval
+                const userChats = await db.chats.where('participantIds').equals(currentUserId).filter(chat => !chat.isGroup || chat.name !== 'World Chat').toArray(); // Exclude world chats
+                if (userChats.length === 0) return;
+
+                // Pick a random chat
+                const randomChat = userChats[Math.floor(Math.random() * userChats.length)];
+                
+                // Pick a random participant from that chat (who is not the current user)
+                const otherParticipants = randomChat.participantIds.filter(id => id !== currentUserId);
+                if (otherParticipants.length === 0) return; // No other participants to send from
+                
+                const randomSenderId = otherParticipants[Math.floor(Math.random() * otherParticipants.length)];
+
+                // Ensure the sender is actually a user and not 'system'
+                const senderUser = await db.users.get(randomSenderId);
+                if (!senderUser) return;
+
+                const newMessage: Message = {
+                    id: uuidv4(),
+                    chatId: randomChat.id,
+                    senderId: randomSenderId,
+                    content: MOCK_MESSAGES[Math.floor(Math.random() * MOCK_MESSAGES.length)],
+                    timestamp: new Date(),
+                    isEvent: false,
+                };
+
+                await db.transaction('rw', db.messages, db.chats, async () => {
+                    await db.messages.add(newMessage);
+                    // Increment unread count for the chat
+                    await db.chats.update(randomChat.id, { 
+                        lastMessage: newMessage,
+                        unreadCount: (randomChat.unreadCount || 0) + 1,
+                    });
+                });
+            }
+
+            // Action 2: Simulate status updates for messages sent by the current user
+            const sentMessages = await db.messages
+                .where({ senderId: currentUserId })
+                .and(msg => msg.status === 'sent' || msg.status === 'delivered')
+                .toArray();
+
+            for (const msg of sentMessages) {
+                if (msg.status === 'sent' && Math.random() < 0.5) { // 50% chance to become 'delivered'
+                    await db.messages.update(msg.id, { status: 'delivered' });
+                    // Also update the lastMessage in the chat if it matches
+                    const chat = await db.chats.get(msg.chatId);
+                    if (chat?.lastMessage?.id === msg.id) {
+                        await db.chats.update(msg.chatId, { 'lastMessage.status': 'delivered' });
+                    }
+                } else if (msg.status === 'delivered' && Math.random() < 0.2) { // 20% chance to become 'seen'
+                    await db.messages.update(msg.id, { status: 'seen' });
+                    const chat = await db.chats.get(msg.chatId);
+                    if (chat?.lastMessage?.id === msg.id) {
+                         await db.chats.update(msg.chatId, { 'lastMessage.status': 'seen' });
+                    }
+                }
+            }
+
+        } catch (error) {
+            console.error("Error in chat simulation interval:", error);
+        }
+    }, 5000); // Run every 5 seconds
+};
+
+/**
+ * Stops the real-time chat simulation by clearing the interval.
+ */
+export const stopChatSimulation = () => {
+    if (chatSimulationInterval) {
+        clearInterval(chatSimulationInterval);
+        chatSimulationInterval = null;
+        console.log("Chat simulation stopped.");
+    }
+};
+
+
+const worldPlayers: Map<string, { position: { x: number, y: number }, velocity: { x: number, y: number } }> = new Map();
+
+/**
+ * Starts the world simulation for mock players and in-world chat.
+ * @param worldId - The ID of the world to simulate.
+ * @param addPlayer - Callback to add a new player to the world state.
+ * @param updatePlayerPosition - Callback to update an existing player's position.
+ * @param addWorldMessage - Callback to add a new world chat message.
+ * @param canvasWidth - The width of the canvas for bounds checking.
+ * @param canvasHeight - The height of the canvas for bounds checking.
+ */
+export const startWorldSimulation = (
+    worldId: string,
+    addPlayer: (player: Player) => void,
+    updatePlayerPosition: (playerId: string, position: { x: number, y: number }) => void,
+    addWorldMessage: (message: Message) => void,
+    canvasWidth: number,
+    canvasHeight: number,
+) => {
+    if (worldSimulationInterval) {
+        console.log("World simulation already running.");
+        return;
+    }
+
+    console.log(`Starting world simulation for ${worldId}...`);
+
+    // Initial population of mock players
+    db.users.filter(user => user.id !== localStorage.getItem('userId')).limit(5).toArray().then(mockUsers => {
+        mockUsers.forEach(user => {
+            if (!worldPlayers.has(user.id)) {
+                const player: Player = {
+                    id: user.id,
+                    name: user.name,
+                    avatar: user.avatar,
+                    position: { x: Math.random() * canvasWidth, y: Math.random() * canvasHeight }
+                };
+                worldPlayers.set(user.id, { position: player.position, velocity: { x: (Math.random() - 0.5) * 4, y: (Math.random() - 0.5) * 4 } });
+                addPlayer(player); // Add to Zustand store
+            }
+        });
+    });
+
+    worldSimulationInterval = setInterval(async () => {
+        // Update player positions
+        worldPlayers.forEach((player, playerId) => {
+            let { x, y } = player.position;
+            let { x: vx, y: vy } = player.velocity;
+
+            x += vx;
+            y += vy;
+
+            // Bounce off walls
+            if (x < 0) { x = 0; vx = -vx; }
+            if (x > canvasWidth) { x = canvasWidth; vx = -vx; }
+            if (y < 0) { y = 0; vy = -vy; }
+            if (y > canvasHeight) { y = canvasHeight; vy = -vy; }
+            
+            player.position = { x, y };
+            player.velocity = { x: vx, y: vy };
+            
+            updatePlayerPosition(playerId, { x, y }); // Update Zustand store
+        });
+
+        // Simulate a new incoming world message
+        if (Math.random() < 0.05) { // 5% chance every 2 seconds
+            const mockUsers = await db.users.filter(user => user.id !== localStorage.getItem('userId')).limit(5).toArray();
+            if (mockUsers.length === 0) return;
+            const randomUser = mockUsers[Math.floor(Math.random() * mockUsers.length)];
+            
+            const newMessage: Message = {
+                id: uuidv4(),
+                chatId: worldId,
+                senderId: randomUser.id,
+                content: WORLD_MOCK_MESSAGES[Math.floor(Math.random() * WORLD_MOCK_MESSAGES.length)],
+                timestamp: new Date(),
+                isEvent: false,
+            };
+
+            // Directly add to DB, and the RealtimeMessageSync will pick it up
+            await db.messages.add(newMessage);
+        }
+
+    }, 1000 / 30); // Run at 30 FPS
+};
+
+/**
+ * Stops the world simulation.
+ */
+export const stopWorldSimulation = () => {
+    if (worldSimulationInterval) {
+        clearInterval(worldSimulationInterval);
+        worldSimulationInterval = null;
+        worldPlayers.clear(); // Clear all mock players
+        console.log("World simulation stopped.");
+    }
+};
+
+// -- src/hooks/useAuth.ts
+import { useAuthStore } from '../store/authStore';
+
+/**
+ * Custom hook to provide simplified access to the authentication state and actions
+ * from the `useAuthStore`. This is a convenience hook to avoid importing the store
+ * directly in components.
+ *
+ * @returns An object containing the authentication state (`currentUser`, `isAuthenticated`,
+ * `isLoading`, `error`) and actions (`login`, `register`, `logout`, etc.).
+ */
+export const useAuth = () => {
+  const authState = useAuthStore();
+  return authState;
+};
+
+// -- src/hooks/useDebounce.ts
+import { useState, useEffect } from 'react';
+
+/**
+ * Custom hook to debounce a value.
+ * @param value - The value to debounce.
+ * @param delay - The delay in milliseconds.
+ * @returns The debounced value.
+ */
+export function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
+// -- src/hooks/useTheme.ts
+import { useEffect } from 'react';
+import { useThemeStore } from '../store/themeStore';
+
+/**
+ * Custom hook to manage theme application and fetching custom themes on application load.
+ */
+export const useTheme = () => {
+  const { currentThemeId, setTheme, fetchCustomThemes } = useThemeStore();
+
+  useEffect(() => {
+    // Apply initial theme and fetch custom themes on mount
+    fetchCustomThemes().then(() => {
+        setTheme(currentThemeId); // Re-apply the last set theme (default or custom)
+    });
+  }, [currentThemeId, setTheme, fetchCustomThemes]);
+
+  return { currentThemeId, setTheme };
+};
+
+// -- src/hooks/useWebSocketSim.ts
+import * as React from 'react';
+import { useAuthStore } from '../store/authStore';
+import { useWorldStore } from '../store/worldStore';
+import { startChatSimulation, stopChatSimulation, startWorldSimulation, stopWorldSimulation } from '../lib/simulation';
+
+/**
+ * A custom hook to manage the lifecycle of both chat and world simulations.
+ * It starts simulations when a user is authenticated and in an active world (for world sim),
+ * and stops them when conditions are no longer met. This mimics a WebSocket connection lifecycle.
+ */
+export const useWebSocketSim = () => {
+    const { currentUser, isAuthenticated } = useAuthStore();
+    const { currentWorld, addPlayer, updatePlayerPosition, removePlayer, addWorldMessage } = useWorldStore();
+
+    // Chat Simulation Lifecycle
+    React.useEffect(() => {
+        if (isAuthenticated && currentUser) {
+            startChatSimulation(currentUser.id);
+        } else {
+            stopChatSimulation();
+        }
+
+        return () => {
+            stopChatSimulation();
+        };
+    }, [isAuthenticated, currentUser]);
+
+    // World Simulation Lifecycle
+    React.useEffect(() => {
+        if (isAuthenticated && currentUser && currentWorld) {
+            // Get current canvas dimensions for simulation bounds
+            const canvasElement = document.getElementById('world-canvas');
+            const canvasWidth = canvasElement?.clientWidth || window.innerWidth;
+            const canvasHeight = canvasElement?.clientHeight || window.innerHeight;
+
+            startWorldSimulation(
+                currentWorld.id,
+                addPlayer,
+                updatePlayerPosition,
+                addWorldMessage,
+                canvasWidth,
+                canvasHeight
+            );
+        } else {
+            stopWorldSimulation();
+        }
+
+        return () => {
+            stopWorldSimulation();
+        };
+    }, [isAuthenticated, currentUser, currentWorld, addPlayer, updatePlayerPosition, removePlayer, addWorldMessage]);
+};
+Chunk 2: Reusable UI Components
+This chunk provides all the atomic and shared UI components used throughout the application, built on Radix UI primitives and styled with Tailwind CSS.
+
+// -- src/components/ui/Avatar.tsx
+import * as React from "react"
+import * as AvatarPrimitive from "@radix-ui/react-avatar"
+import { cn } from "@/lib/utils"
+
+const Avatar = React.forwardRef<
+  React.ElementRef<typeof AvatarPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Root>
+>(({ className, ...props }, ref) => (
+  <AvatarPrimitive.Root
+    ref={ref}
+    className={cn(
+      "relative flex h-10 w-10 shrink-0 overflow-hidden rounded-full",
+      className
+    )}
+    {...props}
+  />
+))
+Avatar.displayName = AvatarPrimitive.Root.displayName
+
+const AvatarImage = React.forwardRef<
+  React.ElementRef<typeof AvatarPrimitive.Image>,
+  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
+>(({ className, ...props }, ref) => (
+  <AvatarPrimitive.Image
+    ref={ref}
+    className={cn("aspect-square h-full w-full", className)}
+    {...props}
+  />
+))
+AvatarImage.displayName = AvatarPrimitive.Image.displayName
+
+const AvatarFallback = React.forwardRef<
+  React.ElementRef<typeof AvatarPrimitive.Fallback>,
+  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Fallback>
+>(({ className, ...props }, ref) => (
+  <AvatarPrimitive.Fallback
+    ref={ref}
+    className={cn(
+      "flex h-full w-full items-center justify-center rounded-full bg-background-secondary text-text-secondary",
+      className
+    )}
+    {...props}
+  />
+))
+AvatarFallback.displayName = AvatarPrimitive.Fallback.displayName
+
+export { Avatar, AvatarImage, AvatarFallback }
+
+// -- src/components/ui/Button.tsx
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-accent focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary-accent text-white hover:bg-primary-accent/90",
+        destructive: "bg-status-error text-white hover:bg-status-error/90",
+        outline: "border border-border bg-transparent hover:bg-background-secondary hover:text-text-primary",
+        secondary: "bg-secondary-accent text-white hover:bg-secondary-accent/90",
+        ghost: "hover:bg-background-secondary hover:text-text-primary",
+        link: "text-primary-accent underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-10 px-4 py-2",
+        sm: "h-9 rounded-md px-3",
+        lg: "h-11 rounded-md px-8",
+        icon: "h-10 w-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+// -- src/components/ui/Card.tsx
+import * as React from "react"
+import { cn } from "@/lib/utils"
+
+const Card = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "rounded-lg border border-border bg-background-primary text-text-primary shadow-sm",
+      className
+    )}
+    {...props}
+  />
+))
+Card.displayName = "Card"
+
+const CardHeader = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    {...props}
+  />
+))
+CardHeader.displayName = "CardHeader"
+
+const CardTitle = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLHeadingElement>
+>(({ className, ...props }, ref) => (
+  <h3
+    ref={ref}
+    className={cn(
+      "text-2xl font-semibold leading-none tracking-tight",
+      className
+    )}
+    {...props}
+  />
+))
+CardTitle.displayName = "CardTitle"
+
+const CardDescription = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    className={cn("text-sm text-text-secondary", className)}
+    {...props}
+  />
+))
+CardDescription.displayName = "CardDescription"
+
+const CardContent = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+))
+CardContent.displayName = "CardContent"
+
+const CardFooter = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex items-center p-6 pt-0", className)}
+    {...props}
+  />
+))
+CardFooter.displayName = "CardFooter"
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
+
+// -- src/components/ui/Dialog.tsx
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+import { X } from "lucide-react"
+import { cn } from "@/lib/utils"
+
+const Dialog = DialogPrimitive.Root
+const DialogTrigger = DialogPrimitive.Trigger
+const DialogPortal = DialogPrimitive.Portal
+const DialogClose = DialogPrimitive.Close
+
+const DialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-background-primary/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      className
+    )}
+    {...props}
+  />
+))
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
+
+const DialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-background-primary p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        className
+      )}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background-primary transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-primary-accent focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-background-secondary">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPortal>
+))
+DialogContent.displayName = DialogPrimitive.Content.displayName
+
+const DialogHeader = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col space-y-1.5 text-center sm:text-left",
+      className
+    )}
+    {...props}
+  />
+)
+DialogHeader.displayName = "DialogHeader"
+
+const DialogFooter = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+      className
+    )}
+    {...props}
+  />
+)
+DialogFooter.displayName = "DialogFooter"
+
+const DialogTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn(
+      "text-lg font-semibold leading-none tracking-tight",
+      className
+    )}
+    {...props}
+  />
+))
+DialogTitle.displayName = DialogPrimitive.Title.displayName
+
+const DialogDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description
+    ref={ref}
+    className={cn("text-sm text-text-secondary", className)}
+    {...props}
+  />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName
+
+export {
+  Dialog,
+  DialogPortal,
+  DialogOverlay,
+  DialogClose,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
+}
+
+// -- src/components/ui/Input.tsx
+import * as React from "react"
+import { cn } from "@/lib/utils"
+
+export interface InputProps
+  extends React.InputHTMLAttributes<HTMLInputElement> {}
+
+const Input = React.forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, ...props }, ref) => {
+    return (
+      <input
+        type={type}
+        className={cn(
+          "flex h-10 w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm ring-offset-background-primary file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-accent focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+          className
+        )}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Input.displayName = "Input"
+
+export { Input }
+
+// -- src/components/ui/Popover.tsx
+import * as React from "react"
+import * as PopoverPrimitive from "@radix-ui/react-popover"
+import { cn } from "@/lib/utils"
+
+const Popover = PopoverPrimitive.Root
+const PopoverTrigger = PopoverPrimitive.Trigger
+const PopoverAnchor = PopoverPrimitive.Anchor
+
+const PopoverContent = React.forwardRef<
+  React.ElementRef<typeof PopoverPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
+>(({ className, align = "center", sideOffset = 4, ...props }, ref) => (
+  <PopoverPrimitive.Portal>
+    <PopoverPrimitive.Content
+      ref={ref}
+      align={align}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 w-72 rounded-md border border-border bg-background-primary p-4 text-text-primary shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        className
+      )}
+      {...props}
+    />
+  </PopoverPrimitive.Portal>
+))
+PopoverContent.displayName = PopoverPrimitive.Content.displayName
+
+export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor }
+
+// -- src/components/ui/ScrollArea.tsx
+import * as React from "react"
+import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
+import { cn } from "@/lib/utils"
+
+const ScrollArea = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+>(({ className, children, ...props }, ref) => (
+  <ScrollAreaPrimitive.Root
+    ref={ref}
+    className={cn("relative overflow-hidden", className)}
+    {...props}
+  >
+    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+      {children}
+    </ScrollAreaPrimitive.Viewport>
+    <ScrollBar />
+    <ScrollAreaPrimitive.Corner />
+  </ScrollAreaPrimitive.Root>
+))
+ScrollArea.displayName = ScrollAreaPrimitive.Root.displayName
+
+const ScrollBar = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
+>(({ className, orientation = "vertical", ...props }, ref) => (
+  <ScrollAreaPrimitive.ScrollAreaScrollbar
+    ref={ref}
+    orientation={orientation}
+    className={cn(
+      "flex touch-none select-none transition-colors",
+      orientation === "vertical" &&
+        "h-full w-2.5 border-l border-l-transparent p-[1px]",
+      orientation === "horizontal" &&
+        "h-2.5 flex-col border-t border-t-transparent p-[1px]",
+      className
+    )}
+    {...props}
+  >
+    <ScrollAreaPrimitive.ScrollAreaThumb className="relative flex-1 rounded-full bg-border" />
+  </ScrollAreaPrimitive.ScrollAreaScrollbar>
+))
+ScrollBar.displayName = ScrollAreaPrimitive.ScrollAreaScrollbar.displayName
+
+export { ScrollArea, ScrollBar }
+
+// -- src/components/ui/Skeleton.tsx
+import { cn } from "@/lib/utils"
+
+function Skeleton({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn("animate-pulse rounded-md bg-background-secondary", className)}
+      {...props}
+    />
+  )
+}
+
+export { Skeleton }
+
+// -- src/components/ui/Spinner.tsx
+import * as React from 'react';
+import { cn } from '@/lib/utils';
+
+interface SpinnerProps extends React.SVGProps<SVGSVGElement> {
+  size?: 'sm' | 'md' | 'lg';
+}
+
+const Spinner = ({ className, size = 'md', ...props }: SpinnerProps) => {
+  const sizeClasses = {
+    sm: 'h-4 w-4',
+    md: 'h-6 w-6',
+    lg: 'h-8 w-8',
+  };
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={cn('animate-spin text-primary-accent', sizeClasses[size], className)}
+      {...props}
+    >
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
+  );
+};
+
+export { Spinner };
+
+// -- src/components/ui/Tabs.tsx
+import * as React from "react"
+import * as TabsPrimitive from "@radix-ui/react-tabs"
+import { cn } from "@/lib/utils"
+
+const Tabs = TabsPrimitive.Root
+
+const TabsList = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.List>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.List
+    ref={ref}
+    className={cn(
+      "inline-flex h-10 items-center justify-center rounded-md bg-background-secondary p-1 text-text-secondary",
+      className
+    )}
+    {...props}
+  />
+))
+TabsList.displayName = TabsPrimitive.List.displayName
+
+const TabsTrigger = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Trigger
+    ref={ref}
+    className={cn(
+      "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background-primary transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-accent focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background-primary data-[state=active]:text-text-primary data-[state=active]:shadow-sm",
+      className
+    )}
+    {...props}
+  />
+))
+TabsTrigger.displayName = TabsPrimitive.Trigger.displayName
+
+const TabsContent = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Content
+    ref={ref}
+    className={cn(
+      "mt-2 ring-offset-background-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-accent focus-visible:ring-offset-2",
+      className
+    )}
+    {...props}
+  />
+))
+TabsContent.displayName = TabsPrimitive.Content.displayName
+
+export { Tabs, TabsList, TabsTrigger, TabsContent }
+
+// -- src/components/ui/ThemeToggle.tsx
+import * as React from 'react';
+import { Moon, Sun } from 'lucide-react';
+import { Button } from '@/components/ui/Button';
+import { useThemeStore } from '@/store/themeStore'; // Use the Zustand store
+
+export function ThemeToggle() {
+  const { currentThemeId, setTheme } = useThemeStore();
+
+  const toggleTheme = () => {
+    setTheme(currentThemeId === 'dark' ? 'light' : 'dark');
+  };
+
+  return (
+    <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+      <Sun className="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+      <Moon className="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+      <span className="sr-only">Toggle theme</span>
+    </Button>
+  );
+}
+
+// -- src/components/ui/Tooltip.tsx
+import * as React from "react"
+import * as TooltipPrimitive from "@radix-ui/react-tooltip"
+import { cn } from "@/lib/utils"
+
+const TooltipProvider = TooltipPrimitive.Provider
+
+const Tooltip = TooltipPrimitive.Root
+
+const TooltipTrigger = TooltipPrimitive.Trigger
+
+const TooltipContent = React.forwardRef<
+  React.ElementRef<typeof TooltipPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <TooltipPrimitive.Content
+    ref={ref}
+    sideOffset={sideOffset}
+    className={cn(
+      "z-50 overflow-hidden rounded-md border border-border bg-background-secondary px-3 py-1.5 text-sm text-text-primary shadow-md animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+      className
+    )}
+    {...props}
+  />
+))
+TooltipContent.displayName = TooltipPrimitive.Content.displayName
+
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }
+
+// -- src/components/shared/FriendsManager.tsx
+import * as React from 'react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs';
+import { Input } from '../ui/Input';
+import { Button } from '../ui/Button';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { useFriendStore } from '@/store/friendStore';
+import { Check, UserPlus, X } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
+import { useDebounce } from '@/hooks/useDebounce';
+
+export const FriendsManager: React.FC = () => {
+    const { fetchMyFriends, fetchPendingRequests } = useFriendStore();
+
+    // Fetch initial data when component mounts
+    React.useEffect(() => {
+        fetchMyFriends();
+        fetchPendingRequests();
+    }, [fetchMyFriends, fetchPendingRequests]);
+
+    return (
+        <Tabs defaultValue="friends" className="w-full">
+            <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="friends" aria-controls="my-friends-tab-content">My Friends</TabsTrigger>
+                <TabsTrigger value="requests" aria-controls="requests-tab-content">Requests</TabsTrigger>
+                <TabsTrigger value="find" aria-controls="find-tab-content">Find</TabsTrigger>
+            </TabsList>
+            <TabsContent value="friends" id="my-friends-tab-content"><MyFriendsTab /></TabsContent>
+            <TabsContent value="requests" id="requests-tab-content"><RequestsTab /></TabsContent>
+            <TabsContent value="find" id="find-tab-content"><FindTab /></TabsContent>
+        </Tabs>
+    );
+};
+
+const MyFriendsTab: React.FC = () => {
+    const { myFriends, removeFriend, isLoading } = useFriendStore();
+
+    const handleRemoveFriend = async (friendId: string, friendName: string) => {
+        if (window.confirm(`Are you sure you want to remove ${friendName} from your friends?`)) {
+            try {
+                await removeFriend(friendId);
+            } catch (error) {
+                console.error("Failed to remove friend:", error);
+                alert("Failed to remove friend."); // Basic error feedback
+            }
+        }
+    };
+
+    return (
+        <div className="space-y-2 max-h-80 overflow-y-auto" role="region" aria-label="My Friends List">
+            {isLoading && !myFriends.length && <div className="flex justify-center p-4"><Spinner /></div>}
+            {!isLoading && myFriends.length === 0 && <p className="text-sm text-center text-text-secondary p-4">You have no friends yet. Find some!</p>}
+            {myFriends.map(friend => (
+                <div key={friend.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary" aria-label={`Friend: ${friend.name}`}>
+                    <div className="flex items-center gap-3">
+                        <Avatar><AvatarImage src={friend.avatar} alt={`Avatar of ${friend.name}`} /><AvatarFallback>{friend.name[0]}</AvatarFallback></Avatar>
+                        <span className="font-medium text-text-primary">{friend.name}</span>
+                    </div>
+                    <Button 
+                        variant="destructive" 
+                        size="sm" 
+                        onClick={() => handleRemoveFriend(friend.id, friend.name)}
+                        disabled={isLoading}
+                        aria-label={`Remove ${friend.name}`}
+                    >
+                        Remove
+                    </Button>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const RequestsTab: React.FC = () => {
+    const { pendingRequests, acceptRequest, rejectRequest, isLoading } = useFriendStore();
+
+    const handleAcceptRequest = async (requestId: string, userName: string) => {
+        try {
+            await acceptRequest(requestId);
+            alert(`Accepted friend request from ${userName}.`);
+        } catch (error) {
+            console.error("Failed to accept request:", error);
+            alert("Failed to accept friend request.");
+        }
+    };
+
+    const handleRejectRequest = async (requestId: string, userName: string) => {
+        if (window.confirm(`Are you sure you want to reject the friend request from ${userName}?`)) {
+            try {
+                await rejectRequest(requestId);
+                alert(`Rejected friend request from ${userName}.`);
+            } catch (error) {
+                console.error("Failed to reject request:", error);
+                alert("Failed to reject friend request.");
+            }
+        }
+    };
+
+    return (
+        <div className="space-y-2 max-h-80 overflow-y-auto" role="region" aria-label="Pending Friend Requests">
+            {isLoading && !pendingRequests.length && <div className="flex justify-center p-4"><Spinner /></div>}
+            {!isLoading && pendingRequests.length === 0 && <p className="text-sm text-center text-text-secondary p-4">No pending friend requests.</p>}
+            {pendingRequests.map(req => (
+                <div key={req.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary" aria-label={`Friend request from ${req.fromUser.name}`}>
+                    <div className="flex items-center gap-3">
+                        <Avatar><AvatarImage src={req.fromUser.avatar} alt={`Avatar of ${req.fromUser.name}`} /><AvatarFallback>{req.fromUser.name[0]}</AvatarFallback></Avatar>
+                        <span className="font-medium text-text-primary">{req.fromUser.name}</span>
+                    </div>
+                    <div className="flex gap-2">
+                        <Button 
+                            size="icon" 
+                            className="bg-status-success hover:bg-status-success/90" 
+                            onClick={() => handleAcceptRequest(req.id, req.fromUser.name)}
+                            disabled={isLoading}
+                            aria-label={`Accept request from ${req.fromUser.name}`}
+                        >
+                            <Check className="h-4 w-4" />
+                        </Button>
+                        <Button 
+                            size="icon" 
+                            variant="destructive" 
+                            onClick={() => handleRejectRequest(req.id, req.fromUser.name)}
+                            disabled={isLoading}
+                            aria-label={`Reject request from ${req.fromUser.name}`}
+                        >
+                            <X className="h-4 w-4" />
+                        </Button>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const FindTab: React.FC = () => {
+    const [query, setQuery] = React.useState('');
+    const debouncedQuery = useDebounce(query, 300);
+    const { searchResults, searchUsers, sendRequest, isLoading, myFriends, pendingRequests } = useFriendStore();
+    const { currentUser } = useAuthStore();
+
+    React.useEffect(() => {
+        if (debouncedQuery && currentUser) {
+            searchUsers(debouncedQuery);
+        } else if (!debouncedQuery) {
+            useFriendStore.setState({ searchResults: [] }); // Clear results if query is empty
+        }
+    }, [debouncedQuery, searchUsers, currentUser]);
+
+    const handleSendRequest = async (toUserId: string, userName: string) => {
+        try {
+            await sendRequest(toUserId);
+            alert(`Friend request sent to ${userName}.`);
+            searchUsers(query); // Refresh search results to update button state
+        } catch (error) {
+            console.error("Failed to send request:", error);
+            alert(error instanceof Error ? error.message : "Failed to send friend request.");
+        }
+    };
+
+    const isFriend = (userId: string) => myFriends.some(f => f.id === userId);
+    const hasPendingRequest = (userId: string) => pendingRequests.some(req => req.fromUserId === userId || req.toUserId === userId);
+
+
+    return (
+        <div className="space-y-4" role="region" aria-label="Find New Friends">
+            <Input 
+                placeholder="Search by name or email..." 
+                value={query} 
+                onChange={(e) => setQuery(e.target.value)} 
+                disabled={isLoading}
+                aria-label="Search for users"
+            />
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+                {isLoading && <div className="flex justify-center p-4"><Spinner/></div>}
+                {!isLoading && !searchResults.length && query && <p className="text-sm text-center text-text-secondary p-4">No users found for "{query}".</p>}
+                {!isLoading && searchResults.length === 0 && !query && <p className="text-sm text-center text-text-secondary p-4">Start typing to find new friends!</p>}
+                {searchResults.map(user => (
+                    <div key={user.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary" aria-label={`User: ${user.name}`}>
+                        <div className="flex items-center gap-3">
+                            <Avatar><AvatarImage src={user.avatar} alt={`Avatar of ${user.name}`} /><AvatarFallback>{user.name[0]}</AvatarFallback></Avatar>
+                            <span className="font-medium text-text-primary">{user.name}</span>
+                        </div>
+                        {isFriend(user.id) ? (
+                            <span className="text-sm text-text-secondary">Friends</span>
+                        ) : hasPendingRequest(user.id) ? (
+                            <span className="text-sm text-text-secondary">Request Sent/Pending</span>
+                        ) : (
+                            <Button 
+                                size="sm" 
+                                onClick={() => handleSendRequest(user.id, user.name)}
+                                disabled={isLoading}
+                                aria-label={`Send friend request to ${user.name}`}
+                            >
+                                <UserPlus className="h-4 w-4 mr-2" />Add
+                            </Button>
+                        )}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// -- src/components/shared/SettingsDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/Dialog';
+import { FriendsManager } from './FriendsManager';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/Tabs';
+import { ThemeSwitcher } from './ThemeSwitcher';
+
+interface SettingsDialogProps {
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onOpenChange }) => {
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent className="sm:max-w-[425px]" aria-labelledby="settings-dialog-title">
+                <DialogHeader>
+                    <DialogTitle id="settings-dialog-title">Settings</DialogTitle>
+                </DialogHeader>
+                <Tabs defaultValue="friends" className="w-full">
+                    <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="friends" aria-controls="settings-friends-tab">Friends</TabsTrigger>
+                        <TabsTrigger value="theme" aria-controls="settings-theme-tab">Theme</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="friends" id="settings-friends-tab">
+                        <FriendsManager />
+                    </TabsContent>
+                    <TabsContent value="theme" id="settings-theme-tab">
+                        <ThemeSwitcher />
+                    </TabsContent>
+                </Tabs>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/shared/ThemeSwitcher.tsx
+import * as React from 'react';
+import { useThemeStore } from '@/store/themeStore';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/Card';
+import type { ThemeConfig } from '@/types';
+import { HexColorPicker } from 'react-colorful'; // Assuming react-colorful is installed
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { Palette, Plus } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+
+// Define the structure for default colors to allow for easy reset
+const DEFAULT_COLORS: ThemeConfig['colors'] = {
+  background: { primary: '#ffffff', secondary: '#f1f5f9' },
+  text: { primary: '#020817', secondary: '#64748b' },
+  border: '#e2e8f0',
+  primary: { accent: '#2563eb' },
+  secondary: { accent: '#475569' },
+  status: { success: '#22c55e', warning: '#f97316', error: '#ef4444', info: '#3b82f6' },
+};
+
+// Helper component for color picking
+interface ColorPickerInputProps {
+    label: string;
+    color: string;
+    onChange: (color: string) => void;
+}
+
+const ColorPickerInput: React.FC<ColorPickerInputProps> = ({ label, color, onChange }) => {
+    const [pickerOpen, setPickerOpen] = React.useState(false);
+    return (
+        <div className="flex items-center justify-between text-sm">
+            <label htmlFor={`color-picker-${label}`} className="capitalize">{label.replace('.', ' ')}</label>
+            <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+                <PopoverTrigger asChild>
+                    <Button 
+                        variant="outline" 
+                        className="w-10 h-10 p-0" 
+                        style={{ backgroundColor: color }}
+                        aria-label={`Select color for ${label}`}
+                    >
+                        <span className="sr-only">{color}</span>
+                    </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0">
+                    <HexColorPicker color={color} onChange={onChange} />
+                </PopoverContent>
+            </Popover>
+        </div>
+    );
+};
+
+export const ThemeSwitcher: React.FC = () => {
+    const { currentThemeId, customThemes, addCustomTheme, setTheme, fetchCustomThemes } = useThemeStore();
+    const [newThemeName, setNewThemeName] = React.useState('');
+    const [newThemeColors, setNewThemeColors] = React.useState(DEFAULT_COLORS);
+    const [isSaving, setIsSaving] = React.useState(false);
+
+    React.useEffect(() => {
+        fetchCustomThemes(); // Ensure custom themes are loaded
+    }, [fetchCustomThemes]);
+
+    const handleColorChange = (category: keyof ThemeConfig['colors'], key: string, value: string) => {
+        setNewThemeColors(prev => ({
+            ...prev,
+            [category]: {
+                ...prev[category],
+                [key as keyof typeof prev[typeof category]]: value,
+            },
+        }));
+    };
+    
+    const handleSaveTheme = async () => {
+        if (!newThemeName.trim()) {
+            alert("Please provide a name for your custom theme.");
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await addCustomTheme({ name: newThemeName, colors: newThemeColors });
+            setNewThemeName('');
+            setNewThemeColors(DEFAULT_COLORS); // Reset to default for next theme
+            alert("Custom theme saved and applied!");
+        } catch (error) {
+            console.error("Failed to save custom theme:", error);
+            alert("Failed to save custom theme.");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    return (
+        <div className="space-y-6">
+            <div>
+                <h3 className="font-semibold mb-2 text-text-primary">Base Themes</h3>
+                <div className="flex flex-wrap gap-2">
+                    <Button 
+                        variant={currentThemeId === 'light' ? 'default' : 'outline'} 
+                        onClick={() => setTheme('light')}
+                        aria-pressed={currentThemeId === 'light'}
+                    >
+                        Light
+                    </Button>
+                    <Button 
+                        variant={currentThemeId === 'dark' ? 'default' : 'outline'} 
+                        onClick={() => setTheme('dark')}
+                        aria-pressed={currentThemeId === 'dark'}
+                    >
+                        Dark
+                    </Button>
+                </div>
+            </div>
+            
+            <div>
+                 <h3 className="font-semibold mb-2 text-text-primary">Custom Themes</h3>
+                 {customThemes.length === 0 && <p className="text-sm text-text-secondary">No custom themes saved yet.</p>}
+                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                    {customThemes.map(theme => (
+                        <Button 
+                            key={theme.id} 
+                            variant={currentThemeId === theme.id ? 'default' : 'secondary'} 
+                            onClick={() => setTheme(theme.id)}
+                            aria-pressed={currentThemeId === theme.id}
+                            className="flex flex-col h-auto p-2"
+                        >
+                            <span className="font-medium">{theme.name}</span>
+                            <div className="flex gap-1 mt-1">
+                                <span className="w-4 h-4 rounded-full" style={{ backgroundColor: theme.colors.background.primary }} title="Background Primary"></span>
+                                <span className="w-4 h-4 rounded-full" style={{ backgroundColor: theme.colors.primary.accent }} title="Primary Accent"></span>
+                            </div>
+                        </Button>
+                    ))}
+                 </div>
+            </div>
+
+            <Card className="p-4">
+                <CardHeader className="p-0 mb-4">
+                    <CardTitle className="text-xl">Create New Theme</CardTitle>
+                    <CardDescription>Design your own color palette for QuikChat.</CardDescription>
+                </CardHeader>
+                <CardContent className="p-0 space-y-3">
+                    <Input 
+                        placeholder="Theme Name" 
+                        value={newThemeName} 
+                        onChange={e => setNewThemeName(e.target.value)} 
+                        aria-label="New theme name"
+                    />
+                    
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                        {Object.entries(newThemeColors).map(([category, values]) => 
+                            Object.entries(values).map(([key, value]) => (
+                                 <ColorPickerInput 
+                                    key={`${category}-${key}`}
+                                    label={`${category}.${key}`}
+                                    color={value as string}
+                                    onChange={color => handleColorChange(category as keyof ThemeConfig['colors'], key, color)}
+                                />
+                            ))
+                        )}
+                    </div>
+                    <Button 
+                        onClick={handleSaveTheme} 
+                        className="w-full mt-4" 
+                        disabled={isSaving || !newThemeName.trim()}
+                        aria-label="Save custom theme"
+                    >
+                        {isSaving ? <Spinner size="sm" /> : <><Plus className="h-4 w-4 mr-2" />Save Theme</>}
+                    </Button>
+                </CardContent>
+            </Card>
+        </div>
+    );
+};
+
+// -- src/components/world/WorldChat.tsx
+import * as React from 'react';
+import { Button } from '../ui/Button';
+import { MessageSquare, X, Send } from 'lucide-react';
+import { Card, CardContent, CardFooter, CardHeader } from '../ui/Card';
+import { useWorldStore } from '@/store/worldStore';
+import TextareaAutosize from 'react-textarea-autosize';
+import { ScrollArea } from '../ui/ScrollArea';
+import { db } from '@/lib/db';
+import type { User } from '@/types';
+import { useAuthStore } from '@/store/authStore';
+import { timeAgo } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+
+
+export const WorldChat: React.FC = () => {
+    const [isOpen, setIsOpen] = React.useState(true);
+    const { worldChatMessages, sendWorldMessage } = useWorldStore();
+    const { currentUser } = useAuthStore();
+    const [message, setMessage] = React.useState('');
+    const scrollAreaRef = React.useRef<HTMLDivElement>(null);
+    const [senders, setSenders] = React.useState<Record<string, User>>({});
+
+    // Fetch sender details for messages
+    React.useEffect(() => {
+        const fetchSenders = async () => {
+            const senderIds = [...new Set(worldChatMessages.map(m => m.senderId))];
+            const newSenders: Record<string, User> = {};
+            for (const id of senderIds) {
+                if (id !== 'system' && !senders[id]) { // Only fetch if not system and not already fetched
+                    const user = await db.users.get(id);
+                    if (user) newSenders[id] = user;
+                }
+            }
+            if (Object.keys(newSenders).length > 0) {
+                setSenders(prev => ({ ...prev, ...newSenders }));
+            }
+        };
+        fetchSenders();
+    }, [worldChatMessages, senders]); // Rerun when messages or existing senders change
+
+    // Auto-scroll to bottom
+    React.useLayoutEffect(() => {
+        if (scrollAreaRef.current) {
+            scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+        }
+    }, [worldChatMessages]);
+
+    const handleSend = () => {
+        if (message.trim()) {
+            sendWorldMessage(message);
+            setMessage('');
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    };
+
+    if (!isOpen) {
+        return (
+            <Button 
+                className="fixed bottom-4 right-4 z-20 md:absolute" 
+                size="icon" 
+                onClick={() => setIsOpen(true)}
+                aria-label="Open world chat"
+            >
+                <MessageSquare className="h-5 w-5" />
+            </Button>
+        );
+    }
+
+    return (
+        <Card className="fixed bottom-4 right-4 z-20 w-80 h-[50vh] flex flex-col md:absolute" aria-label="World chat panel">
+            <CardHeader className="p-2 flex-row items-center justify-between border-b border-border">
+                <p className="font-semibold text-text-primary">World Chat</p>
+                <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    onClick={() => setIsOpen(false)}
+                    aria-label="Close world chat"
+                >
+                    <X className="h-4 w-4"/>
+                </Button>
+            </CardHeader>
+            <CardContent className="flex-1 p-2 overflow-hidden">
+                <ScrollArea className="h-full" viewportRef={scrollAreaRef} aria-label="World chat messages display area">
+                    <div className="p-2 space-y-2">
+                    {worldChatMessages.map(msg => (
+                        <div key={msg.id} className="flex items-start gap-2">
+                           {msg.senderId !== 'system' && (
+                                <Avatar className="h-6 w-6 flex-shrink-0">
+                                    <AvatarImage src={senders[msg.senderId]?.avatar} alt={`Avatar of ${senders[msg.senderId]?.name}`} loading="lazy" />
+                                    <AvatarFallback className="text-xs">{senders[msg.senderId]?.name.charAt(0)}</AvatarFallback>
+                                </Avatar>
+                           )}
+                           <div className="flex flex-col flex-1 min-w-0">
+                               <TooltipProvider>
+                                   <Tooltip>
+                                       <TooltipTrigger asChild>
+                                           <span className="text-sm break-words">
+                                               <span className="font-bold text-primary-accent">{senders[msg.senderId]?.name || 'System'}: </span>
+                                               {msg.content}
+                                           </span>
+                                       </TooltipTrigger>
+                                       <TooltipContent>
+                                           <p>{msg.timestamp.toLocaleString()}</p>
+                                       </TooltipContent>
+                                   </Tooltip>
+                               </TooltipProvider>
+                               <span className="text-xs text-text-secondary opacity-70 ml-auto flex-shrink-0">{timeAgo(msg.timestamp)}</span>
+                           </div>
+                        </div>
+                    ))}
+                    {!worldChatMessages.length && (
+                        <div className="text-center text-sm text-text-secondary py-4" role="status">No messages in this world yet. Say hello!</div>
+                    )}
+                    </div>
+                </ScrollArea>
+            </CardContent>
+            <CardFooter className="p-2 border-t border-border">
+                <TextareaAutosize
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Say something..."
+                    className="flex-1 bg-background-primary p-2 rounded-md border border-border resize-none focus:outline-none focus:ring-1 focus:ring-primary-accent text-sm mr-2"
+                    aria-label="Message input for world chat"
+                    disabled={!currentUser}
+                />
+                <Button onClick={handleSend} size="icon" disabled={!message.trim() || !currentUser} aria-label="Send message">
+                    <Send className="h-5 w-5" />
+                </Button>
+            </CardFooter>
+        </Card>
+    );
+};
+Chunk 3: Application Structure & Features (Zustand Stores, Pages, Layouts, Feature Components)
+This largest chunk brings everything together to form the complete application. It includes all Zustand global state stores, top-level route components, layouts, authentication UI, chat features, and world features.
+
+// -- src/main.tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css'; // Assuming your Tailwind CSS imports are here
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+
+// -- src/App.tsx
+import React, { useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { seedDatabase } from './lib/db';
+import { useAuthStore } from './store/authStore';
+import { Spinner } from './components/ui/Spinner';
+import { useWebSocketSim } from './hooks/useWebSocketSim';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from './lib/db';
+import { useChatStore } from './store/chatStore';
+import { useWorldStore } from './store/worldStore'; // Import useWorldStore
+import { useTheme } from './hooks/useTheme'; // Import the useTheme hook
+
+// Lazy load pages for better performance
+const HomePage = React.lazy(() => import('./pages/HomePage'));
+const LoginPage = React.lazy(() => import('./pages/LoginPage'));
+const OpenWorldPage = React.lazy(() => import('./pages/OpenWorldPage'));
+const WorldInstancePage = React.lazy(() => import('./pages/WorldInstancePage'));
+
+
+/**
+ * A component to handle protected routes.
+ * If the user is authenticated, it renders the child routes (Outlet).
+ * Otherwise, it navigates the user to the login page.
+ */
+const ProtectedRoute: React.FC = () => {
+    const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+    
+    // If authenticated, render the nested routes. If not, redirect to login.
+    return isAuthenticated ? <Outlet /> : <Navigate to="/login" replace />;
+};
+
+/**
+ * A component to handle public routes for unauthenticated users.
+ * If the user is authenticated, it redirects them to the home page.
+ * Otherwise, it renders the child routes (Outlet).
+ */
+const PublicRoute: React.FC = () => {
+    const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+
+    // If authenticated, redirect to home. If not, render the public route (e.g., login page).
+    return isAuthenticated ? <Navigate to="/" replace /> : <Outlet />;
+};
+
+/**
+ * A component that listens for real-time message updates from Dexie
+ * and syncs them with the Zustand store.
+ * This ensures messages added by the simulation or other tabs are reflected.
+ */
+const RealtimeMessageSync = () => {
+    const addIncomingMessage = useChatStore(state => state.addIncomingMessage);
+    const addWorldMessage = useWorldStore(state => state.addWorldMessage); // For world chat sync
+    
+    useEffect(() => {
+        // Hook into Dexie's creating event for messages
+        const creatingHook = (primKey: any, obj: any, trans: Dexie.Transaction) => {
+            const currentUser = useAuthStore.getState().currentUser;
+            // Only process if the message is from another user or system
+            if (obj.senderId !== currentUser?.id) {
+                // Determine if it's a regular chat message or a world message
+                // This assumes worldId is used as chatId for world messages
+                const currentWorld = useWorldStore.getState().currentWorld;
+                const isWorldMessage = !!currentWorld && obj.chatId === currentWorld.id;
+
+                if (isWorldMessage) {
+                    addWorldMessage(obj);
+                } else {
+                    addIncomingMessage(obj);
+                }
+            }
+        };
+
+        db.messages.hook('creating', creatingHook);
+
+        return () => {
+            // Remove the hook when the component unmounts
+            db.messages.hook('creating').unsubscribe(creatingHook);
+        };
+    }, [addIncomingMessage, addWorldMessage]);
+
+    return null; // This component does not render anything
+};
+
+/**
+ * The main application component.
+ * It sets up routing, handles session checking, and displays a loading state
+ * while the session is being verified. It also initializes global hooks.
+ */
+const App: React.FC = () => {
+  const { checkSession, isLoading, isAuthenticated } = useAuthStore();
+
+  // Initialize the WebSocket simulation hook. It will manage its own lifecycle.
+  useWebSocketSim();
+  // Initialize theme hook to apply theme on load and manage custom themes.
+  useTheme();
+
+  useEffect(() => {
+    // Seed the database on initial load if it's empty.
+    seedDatabase().catch(console.error);
+    // Check for an existing session.
+    checkSession();
+  }, [checkSession]);
+
+  // Display a global spinner while checking the session.
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background-primary" role="status" aria-label="Loading application">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <Router>
+        {/* Only mount the real-time sync when authenticated */}
+        {isAuthenticated && <RealtimeMessageSync />}
+        <React.Suspense fallback={
+            <div className="min-h-screen flex items-center justify-center bg-background-primary" role="status" aria-label="Loading content">
+                <Spinner size="lg" />
+            </div>
+        }>
+            <Routes>
+                {/* Routes for unauthenticated users */}
+                <Route element={<PublicRoute />}>
+                    <Route path="/login" element={<LoginPage />} />
+                </Route>
+
+                {/* Routes for authenticated users */}
+                <Route element={<ProtectedRoute />}>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/open-world" element={<OpenWorldPage />} />
+                    <Route path="/open-world/:worldId" element={<WorldInstancePage />} />
+                </Route>
+                
+                {/* Fallback route - if no other route matches */}
+                <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+        </React.Suspense>
+    </Router>
+  );
+};
+
+export default App;
+
+// -- src/store/authStore.ts
+import create from 'zustand';
+import type { User } from '../types';
+import * as api from '../lib/api';
+
+interface AuthState {
+  currentUser: User | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  error: string | null;
+  checkSession: () => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  quickLogin: (userId: string) => Promise<void>;
+  register: (name: string, email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+  clearError: () => void;
+}
+
+export const useAuthStore = create<AuthState>((set, get) => ({
+  currentUser: null,
+  isAuthenticated: false,
+  isLoading: true, // Start with loading true to check session
+  error: null,
+  
+  checkSession: async () => {
+    set({ isLoading: true });
+    try {
+      const userId = sessionStorage.getItem('userId');
+      if (userId) {
+        const user = await api.getUserById(userId);
+        if (user) {
+          set({ currentUser: user, isAuthenticated: true, isLoading: false });
+        } else {
+          sessionStorage.removeItem('userId');
+          set({ currentUser: null, isAuthenticated: false, isLoading: false });
+        }
+      } else {
+        set({ isLoading: false });
+      }
+    } catch (error) {
+      console.error("Session check failed:", error);
+      set({ currentUser: null, isAuthenticated: false, isLoading: false, error: 'Failed to verify session.' });
+    }
+  },
+
+  login: async (email, password) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user = await api.login(email, password);
+      sessionStorage.setItem('userId', user.id);
+      set({ currentUser: user, isAuthenticated: true, isLoading: false });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
+      set({ isLoading: false, error: errorMessage });
+      throw error;
+    }
+  },
+
+  quickLogin: async (userId: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user = await api.quickLogin(userId);
+      sessionStorage.setItem('userId', user.id);
+      set({ currentUser: user, isAuthenticated: true, isLoading: false });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
+      set({ isLoading: false, error: errorMessage });
+      throw error;
+    }
+  },
+
+  register: async (name, email, password) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user = await api.register(name, email, password);
+      sessionStorage.setItem('userId', user.id);
+      set({ currentUser: user, isAuthenticated: true, isLoading: false });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred.';
+      set({ isLoading: false, error: errorMessage });
+      throw error;
+    }
+  },
+
+  logout: async () => {
+    const { currentUser } = get();
+    if (currentUser) {
+      await api.logout(currentUser.id);
+    }
+    sessionStorage.removeItem('userId');
+    set({ currentUser: null, isAuthenticated: false });
+  },
+
+  clearError: () => {
+    set({ error: null });
+  },
+}));
+
+// -- src/store/chatStore.ts
+import create from 'zustand';
+import type { Chat, Message } from '../types';
+import * as api from '../lib/api';
+import { useAuthStore } from './authStore';
+
+interface ChatState {
+  activeChatId: string | null;
+  messages: Message[];
+  messagesLoading: boolean;
+  hasMoreMessages: boolean;
+  
+  setActiveChatId: (chatId: string | null) => Promise<void>;
+  fetchMessages: (chatId: string) => Promise<void>;
+  loadMoreMessages: () => Promise<void>;
+  sendMessage: (content: string) => Promise<void>;
+  addIncomingMessage: (message: Message) => void;
+}
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  activeChatId: null,
+  messages: [],
+  messagesLoading: false,
+  hasMoreMessages: true,
+
+  /**
+   * Sets the active chat, clears previous messages, and fetches new ones.
+   * Also marks messages in the newly active chat as seen.
+   */
+  setActiveChatId: async (chatId: string | null) => {
+    const currentActiveId = get().activeChatId;
+    if (currentActiveId === chatId) return;
+    
+    set({ activeChatId: chatId, messages: [], hasMoreMessages: true });
+    
+    if (chatId) {
+      await get().fetchMessages(chatId);
+      const currentUserId = useAuthStore.getState().currentUser?.id;
+      if (currentUserId) {
+        await api.markMessagesAsSeen(chatId, currentUserId);
+      }
+    }
+  },
+
+  /**
+   * Fetches the initial batch of messages for a chat.
+   */
+  fetchMessages: async (chatId: string) => {
+    set({ messagesLoading: true });
+    try {
+      const { messages, nextCursor } = await api.getMessagesForChat(chatId);
+      set({
+        messages,
+        hasMoreMessages: !!nextCursor,
+        messagesLoading: false,
+      });
+    } catch (error) {
+      console.error("Failed to fetch messages:", error);
+      set({ messagesLoading: false });
+    }
+  },
+
+  /**
+   * Loads an older batch of messages for the active chat for pagination.
+   */
+  loadMoreMessages: async () => {
+    const { activeChatId, messages, hasMoreMessages } = get();
+    if (!activeChatId || !hasMoreMessages) return;
+    if (messages.length === 0) return; // Prevent loading more if no messages are present yet
+
+    set({ messagesLoading: true });
+    try {
+      const oldestMessage = messages[0];
+      const cursor = oldestMessage?.timestamp.getTime();
+      const { messages: newMessages, nextCursor } = await api.getMessagesForChat(activeChatId, 50, cursor);
+      
+      set(state => ({
+        messages: [...newMessages, ...state.messages],
+        hasMoreMessages: !!nextCursor,
+        messagesLoading: false,
+      }));
+    } catch (error)      {
+      console.error("Failed to load more messages:", error);
+      set({ messagesLoading: false });
+    }
+  },
+
+  /**
+   * Sends a message from the current user to the active chat.
+   */
+  sendMessage: async (content: string) => {
+    const { activeChatId } = get();
+    const senderId = useAuthStore.getState().currentUser?.id;
+
+    if (!activeChatId || !senderId || !content.trim()) return;
+
+    try {
+      const newMessage = await api.sendMessage(activeChatId, senderId, content);
+      set(state => ({ messages: [...state.messages, newMessage] }));
+    } catch (error) {
+      console.error("Failed to send message:", error);
+      // Here you might want to add UI feedback for a failed message
+    }
+  },
+
+  /**
+   * Adds a new incoming message to the message list if it belongs to the active chat.
+   * This is intended to be called by a listener (e.g., from our simulation hook or Dexie hook).
+   * @param message - The new message object.
+   */
+  addIncomingMessage: (message: Message) => {
+    const { activeChatId } = get();
+    if (message.chatId === activeChatId) {
+        set(state => ({
+            messages: [...state.messages, message],
+        }));
+    }
+  },
+}));
+
+// -- src/store/friendStore.ts
+import create from 'zustand';
+import type { User, FriendRequest } from '../types';
+import * as api from '../lib/api';
+import { useAuthStore } from './authStore';
+
+interface FriendState {
+  myFriends: User[];
+  pendingRequests: (FriendRequest & { fromUser: User })[];
+  searchResults: User[];
+  isLoading: boolean;
+  error: string | null;
+
+  fetchMyFriends: () => Promise<void>;
+  fetchPendingRequests: () => Promise<void>;
+  searchUsers: (query: string) => Promise<void>;
+  sendRequest: (toUserId: string) => Promise<void>;
+  acceptRequest: (requestId: string) => Promise<void>;
+  rejectRequest: (requestId: string) => Promise<void>;
+  removeFriend: (friendId: string) => Promise<void>;
+  clearError: () => void;
+}
+
+const getCurrentUserId = () => useAuthStore.getState().currentUser?.id;
+
+export const useFriendStore = create<FriendState>((set, get) => ({
+  myFriends: [],
+  pendingRequests: [],
+  searchResults: [],
+  isLoading: false,
+  error: null,
+
+  fetchMyFriends: async () => {
+    const userId = getCurrentUserId();
+    if (!userId) {
+        set({ myFriends: [], isLoading: false }); // Clear friends if no user
+        return;
+    }
+    set({ isLoading: true, error: null });
+    try {
+        const friends = await api.getFriends(userId);
+        set({ myFriends: friends, isLoading: false });
+    } catch (e) {
+        set({ isLoading: false, error: "Failed to load friends." });
+        console.error("Error fetching friends:", e);
+    }
+  },
+
+  fetchPendingRequests: async () => {
+    const userId = getCurrentUserId();
+    if (!userId) {
+        set({ pendingRequests: [], isLoading: false }); // Clear requests if no user
+        return;
+    }
+    set({ isLoading: true, error: null });
+    try {
+        const requests = await api.getFriendRequests(userId);
+        const requestsWithUsers = await Promise.all(
+            requests.map(async req => ({
+                ...req,
+                fromUser: await api.getUserById(req.fromUserId) as User, // Assume user exists
+            }))
+        );
+        set({ pendingRequests: requestsWithUsers.filter(r => r.fromUser), isLoading: false });
+    } catch (e) {
+        set({ isLoading: false, error: "Failed to load friend requests." });
+        console.error("Error fetching requests:", e);
+    }
+  },
+  
+  searchUsers: async (query: string) => {
+    const userId = getCurrentUserId();
+    if (!userId) {
+        set({ searchResults: [], isLoading: false }); // Clear search if no user
+        return;
+    }
+    set({ isLoading: true, error: null });
+    try {
+        const results = await api.searchUsers(query, userId);
+        set({ searchResults: results, isLoading: false });
+    } catch (e) {
+        set({ isLoading: false, error: "Failed to search users." });
+        console.error("Error searching users:", e);
+    }
+  },
+
+  sendRequest: async (toUserId: string) => {
+    const fromUserId = getCurrentUserId();
+    if (!fromUserId) return;
+    set({ isLoading: true, error: null });
+    try {
+        await api.sendFriendRequest(fromUserId, toUserId);
+        set({ isLoading: false });
+        // Optionally refetch search results or update a local 'request sent' status
+    } catch (e) {
+        set({ isLoading: false, error: (e as Error).message });
+        console.error("Error sending request:", e);
+        throw e; // Re-throw to allow component to catch and display specific message
+    }
+  },
+  
+  acceptRequest: async (requestId: string) => {
+      set({ isLoading: true, error: null });
+      try {
+          await api.updateFriendRequestStatus(requestId, 'accepted');
+          await get().fetchPendingRequests(); // Refresh lists
+          await get().fetchMyFriends();
+          set({ isLoading: false });
+      } catch (e) {
+          set({ isLoading: false, error: (e as Error).message });
+          console.error("Error accepting request:", e);
+          throw e;
+      }
+  },
+
+  rejectRequest: async (requestId: string) => {
+      set({ isLoading: true, error: null });
+      try {
+          await api.updateFriendRequestStatus(requestId, 'rejected');
+          await get().fetchPendingRequests(); // Refresh list
+          set({ isLoading: false });
+      } catch (e) {
+          set({ isLoading: false, error: (e as Error).message });
+          console.error("Error rejecting request:", e);
+          throw e;
+      }
+  },
+
+  removeFriend: async (friendId: string) => {
+      const userId = getCurrentUserId();
+      if (!userId) return;
+      set({ isLoading: true, error: null });
+      try {
+          await api.removeFriend(userId, friendId);
+          await get().fetchMyFriends(); // Refresh list
+          set({ isLoading: false });
+      } catch (e) {
+          set({ isLoading: false, error: (e as Error).message });
+          console.error("Error removing friend:", e);
+          throw e;
+      }
+  },
+
+  clearError: () => {
+    set({ error: null });
+  },
+}));
+
+// -- src/store/worldStore.ts
+import create from 'zustand';
+import type { OpenWorld, Player, Message } from '../types';
+import * as api from '../lib/api';
+import { useAuthStore } from './authStore';
+
+interface WorldState {
+  openWorlds: OpenWorld[];
+  currentWorld: OpenWorld | null;
+  playersInWorld: Player[];
+  worldChatMessages: Message[]; // Messages specific to the current world
+  isLoadingWorlds: boolean;
+  isJoiningWorld: boolean;
+  error: string | null;
+
+  fetchOpenWorlds: () => Promise<void>;
+  joinWorld: (worldId: string, password?: string) => Promise<boolean>;
+  leaveWorld: () => void;
+  updatePlayerPosition: (playerId: string, position: { x: number, y: number }) => void;
+  addPlayer: (player: Player) => void;
+  removePlayer: (playerId: string) => void;
+  sendWorldMessage: (content: string) => Promise<void>;
+  addWorldMessage: (message: Message) => void;
+  clearError: () => void;
+}
+
+export const useWorldStore = create<WorldState>((set, get) => ({
+    openWorlds: [],
+    currentWorld: null,
+    playersInWorld: [],
+    worldChatMessages: [],
+    isLoadingWorlds: false,
+    isJoiningWorld: false,
+    error: null,
+
+    fetchOpenWorlds: async () => {
+        set({ isLoadingWorlds: true, error: null });
+        try {
+            const worlds = await api.getOpenWorlds();
+            set({ openWorlds: worlds, isLoadingWorlds: false });
+        } catch (error) {
+            console.error("Failed to fetch worlds:", error);
+            set({ isLoadingWorlds: false, error: "Could not load worlds." });
+        }
+    },
+
+    joinWorld: async (worldId, password) => {
+        set({ isJoiningWorld: true, error: null });
+        try {
+            const world = await api.joinWorld(worldId, password);
+            const currentUser = useAuthStore.getState().currentUser;
+            if (!currentUser) throw new Error("User not authenticated");
+
+            const currentPlayer: Player = {
+                id: currentUser.id,
+                name: currentUser.name,
+                avatar: currentUser.avatar,
+                position: { x: 400, y: 300 } // Start in center
+            };
+
+            set({ currentWorld: world, isJoiningWorld: false, playersInWorld: [currentPlayer], worldChatMessages: [] }); // Clear old world messages
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "Failed to join world.";
+            console.error(errorMessage);
+            set({ isJoiningWorld: false, error: errorMessage });
+            return false;
+        }
+    },
+
+    leaveWorld: () => {
+        set({ currentWorld: null, playersInWorld: [], worldChatMessages: [] });
+    },
+    
+    updatePlayerPosition: (playerId, position) => {
+        set(state => ({
+            playersInWorld: state.playersInWorld.map(p => p.id === playerId ? { ...p, position } : p)
+        }));
+    },
+
+    addPlayer: (player) => {
+        set(state => ({ playersInWorld: [...state.playersInWorld, player] }));
+    },
+
+    removePlayer: (playerId) => {
+        set(state => ({ playersInWorld: state.playersInWorld.filter(p => p.id !== playerId) }));
+    },
+
+    sendWorldMessage: async (content: string) => {
+        const { currentWorld } = get();
+        const currentUser = useAuthStore.getState().currentUser;
+        if (!currentWorld || !currentUser || !content.trim()) return;
+
+        try {
+            // We rely on the Dexie hook in App.tsx for adding to worldChatMessages
+            await api.sendWorldMessage(currentWorld.id, currentUser.id, content);
+        } catch (error) {
+            console.error("Failed to send world message:", error);
+            set({ error: "Failed to send message." });
+        }
+    },
+
+    addWorldMessage: (message: Message) => {
+        set(state => ({
+            worldChatMessages: [...state.worldChatMessages, message].sort((a,b) => a.timestamp.getTime() - b.timestamp.getTime())
+        }));
+    },
+
+    clearError: () => {
+        set({ error: null });
+    },
+}));
+
+// -- src/store/themeStore.ts
+import create from 'zustand';
+import type { ThemeConfig } from '../types';
+import * as api from '../lib/api';
+
+interface ThemeState {
+    currentThemeId: string;
+    customThemes: ThemeConfig[];
+    fetchCustomThemes: () => Promise<void>;
+    setTheme: (themeId: string) => void;
+    addCustomTheme: (theme: Omit<ThemeConfig, 'id'>) => Promise<void>;
+}
+
+// Helper to convert hex to RGB values for CSS variables
+const hexToRgb = (hex: string) => {
+  let c: any = hex.substring(1).split('');
+  if (c.length === 3) { c = [c[0], c[0], c[1], c[1], c[2], c[2]]; }
+  c = '0x' + c.join('');
+  return [(c >> 16) & 255, (c >> 8) & 255, c & 255].join(' ');
+};
+
+// Applies a custom theme by setting CSS variables
+const applyCustomTheme = (theme: ThemeConfig) => {
+    const root = document.documentElement;
+    root.classList.remove('light', 'dark'); // Remove base themes
+
+    // Set custom class for the theme
+    root.classList.add(`theme-custom-${theme.id}`);
+
+    // Apply colors as CSS variables
+    Object.entries(theme.colors).forEach(([category, values]) => {
+        Object.entries(values).forEach(([key, value]) => {
+            const varName = `--color-${category}-${key}`;
+            if (typeof value === 'string') {
+                 root.style.setProperty(varName, hexToRgb(value));
+            }
+        });
+    });
+};
+
+// Resets custom CSS variables (important when switching away from a custom theme)
+const resetCustomThemeVariables = () => {
+    const root = document.documentElement;
+    const currentThemeClass = Array.from(root.classList).find(cls => cls.startsWith('theme-custom-'));
+    if (currentThemeClass) {
+        root.classList.remove(currentThemeClass);
+    }
+    // A more robust reset would iterate all possible custom variables and remove them
+    // For now, we rely on the default styles of 'light' or 'dark' to override.
+    root.style.cssText = '';
+};
+
+
+export const useThemeStore = create<ThemeState>((set, get) => ({
+    currentThemeId: localStorage.getItem('themeId') || 'light', // Persist last chosen theme
+    customThemes: [],
+
+    fetchCustomThemes: async () => {
+        try {
+            const themes = await api.getThemes();
+            set({ customThemes: themes });
+        } catch (error) {
+            console.error("Failed to fetch custom themes:", error);
+        }
+    },
+
+    setTheme: (themeId: string) => {
+        localStorage.setItem('themeId', themeId);
+        const root = document.documentElement;
+        
+        resetCustomThemeVariables(); // Always reset custom variables first
+
+        if (themeId === 'light' || themeId === 'dark') {
+            // Apply base themes
+            root.classList.remove('light', 'dark');
+            root.classList.add(themeId);
+        } else {
+            // Apply custom theme
+            const customTheme = get().customThemes.find(t => t.id === themeId);
+            if (customTheme) {
+                applyCustomTheme(customTheme);
+            } else {
+                // Fallback to light if custom theme not found
+                root.classList.add('light');
+                set({ currentThemeId: 'light' });
+            }
+        }
+        set({ currentThemeId: themeId });
+    },
+
+    addCustomTheme: async (themeData) => {
+        try {
+            const newTheme = await api.saveTheme(themeData);
+            set(state => ({ customThemes: [...state.customThemes, newTheme] }));
+            get().setTheme(newTheme.id); // Apply the new theme immediately
+        } catch (error) {
+            console.error("Failed to save custom theme:", error);
+            throw error; // Re-throw for UI to handle
+        }
+    },
+}));
+
+// -- src/components/layout/AuthLayout.tsx
+import * as React from 'react';
+import { ThemeToggle } from '../ui/ThemeToggle';
+
+interface AuthLayoutProps {
+  children: React.ReactNode;
+}
+
+/**
+ * A simple layout component for authentication pages.
+ * It centers the content vertically and horizontally and includes a theme toggle.
+ */
+export const AuthLayout: React.FC<AuthLayoutProps> = ({ children }) => {
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-background-primary p-4">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
+      <div className="w-full max-w-md">
+        {children}
+      </div>
+    </div>
+  );
+};
+
+// -- src/components/layout/MainLayout.tsx
+import * as React from 'react';
+import { Sidebar } from '../chat/Sidebar';
+import { useChatStore } from '@/store/chatStore';
+import { MessageSquare, Menu } from 'lucide-react'; // Added Menu icon
+import { ChatView } from '../chat/ChatView';
+import { SettingsDialog } from '../shared/SettingsDialog';
+import { CreateChatDialog } from '../chat/CreateChatDialog';
+import { Button } from '../ui/Button'; // Assuming Button is a UI component
+
+export const MainLayout: React.FC = () => {
+    const activeChatId = useChatStore((state) => state.activeChatId);
+    const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+    const [isCreateChatOpen, setIsCreateChatOpen] = React.useState(false);
+    const [isSidebarOpen, setIsSidebarOpen] = React.useState(window.innerWidth >= 768); // Start open on desktop
+
+    const toggleSidebar = () => setIsSidebarOpen(prev => !prev);
+
+    // Close sidebar on navigation on mobile
+    React.useEffect(() => {
+        const handleResize = () => {
+            if (window.innerWidth >= 768) {
+                setIsSidebarOpen(true);
+            } else {
+                // On mobile, if a chat is active, close sidebar. Otherwise, keep current state.
+                if (activeChatId) setIsSidebarOpen(false);
+            }
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, [activeChatId]); // Re-evaluate when activeChatId changes
+
+    return (
+        <>
+            <div className="flex h-screen w-full bg-background-primary text-text-primary">
+                {/* Mobile sidebar toggle button */}
+                <div className="md:hidden absolute top-2 left-2 z-30">
+                    <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        onClick={toggleSidebar}
+                        aria-label={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                    >
+                        <Menu className="h-6 w-6" /> 
+                    </Button>
+                </div>
+
+                {/* Left Panel: Sidebar - Responsive behavior */}
+                <aside className={`h-full flex flex-col border-r border-border bg-background-secondary 
+                                  md:relative fixed top-0 left-0 w-80 z-20 transition-transform duration-300 ease-in-out
+                                  ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
+                    <Sidebar 
+                        onNewChat={() => { setIsCreateChatOpen(true); if (window.innerWidth < 768) setIsSidebarOpen(false); }}
+                        onSettings={() => { setIsSettingsOpen(true); if (window.innerWidth < 768) setIsSidebarOpen(false); }}
+                        onCloseSidebar={() => setIsSidebarOpen(false)} // For mobile close button
+                    />
+                </aside>
+
+                {/* Main Content Area */}
+                <main className="flex-1 h-full flex flex-col md:ml-0 transition-all duration-300 ease-in-out overflow-hidden">
+                    {activeChatId ? (
+                        <ChatView key={activeChatId} />
+                    ) : (
+                        <div className="flex h-full flex-col items-center justify-center text-text-secondary p-4" role="status">
+                            <MessageSquare size={48} className="mb-4" aria-hidden="true" />
+                            <h2 className="text-2xl font-semibold text-center">Welcome to QuikChat</h2>
+                            <p className="text-center">Select a conversation to start messaging.</p>
+                        </div>
+                    )}
+                </main>
+            </div>
+            
+            <SettingsDialog isOpen={isSettingsOpen} onOpenChange={setIsSettingsOpen} />
+            <CreateChatDialog isOpen={isCreateChatOpen} onOpenChange={setIsCreateChatOpen} />
+        </>
+    );
+};
+
+// -- src/pages/HomePage.tsx
+import * as React from 'react';
+import { MainLayout } from '@/components/layout/MainLayout';
+
+/**
+ * The main home page for authenticated users.
+ * It renders the MainLayout which contains the core application UI.
+ */
+const HomePage: React.FC = () => {
+  return (
+    <MainLayout />
+  );
+};
+
+export default HomePage;
+
+// -- src/pages/LoginPage.tsx
+import * as React from 'react';
+import { AuthLayout } from '@/components/layout/AuthLayout';
+import { AuthPage } from '@/components/auth/AuthPage';
+
+/**
+ * Renders the login page by wrapping the AuthPage component with the AuthLayout.
+ * This is the primary entry point for unauthenticated users.
+ */
+const LoginPage: React.FC = () => {
+  return (
+    <AuthLayout>
+      <AuthPage />
+    </AuthLayout>
+  );
+};
+
+export default LoginPage;
+
+// -- src/pages/OpenWorldPage.tsx
+import * as React from 'react';
+import { useWorldStore } from '@/store/worldStore';
+import { WorldCard } from '@/components/world/WorldCard';
+import { Skeleton } from '@/components/ui/Skeleton';
+import type { OpenWorld } from '@/types';
+import { JoinWorldDialog } from '@/components/world/JoinWorldDialog';
+import { useNavigate } from 'react-router-dom';
+import { Spinner } from '@/components/ui/Spinner';
+
+const OpenWorldPage: React.FC = () => {
+    const { openWorlds, isLoadingWorlds, fetchOpenWorlds, joinWorld, error, clearError } = useWorldStore();
+    const [selectedWorldForJoin, setSelectedWorldForJoin] = React.useState<OpenWorld | null>(null);
+    const navigate = useNavigate();
+
+    React.useEffect(() => {
+        fetchOpenWorlds();
+    }, [fetchOpenWorlds]);
+
+    // Clear any world-related errors when leaving the page
+    React.useEffect(() => {
+        return () => {
+            clearError();
+        };
+    }, [clearError]);
+
+
+    const handleJoinClick = async (world: OpenWorld) => {
+        if (world.isPasswordProtected) {
+            setSelectedWorldForJoin(world);
+        } else {
+            const success = await joinWorld(world.id);
+            if (success) {
+                navigate(`/open-world/${world.id}`);
+            } else {
+                alert(error || "Failed to join world."); // Provide basic feedback
+            }
+        }
+    };
+
+    return (
+        <div className="p-4 sm:p-8 bg-background-secondary min-h-screen">
+            <h1 className="text-3xl sm:text-4xl font-heading mb-6 text-text-primary">Open Worlds</h1>
+            {isLoadingWorlds ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6" role="progressbar" aria-label="Loading open worlds">
+                    {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-80 w-full" />)}
+                </div>
+            ) : (
+                <>
+                    {openWorlds.length === 0 ? (
+                        <div className="text-center text-text-secondary py-8" role="status">
+                            <p>No open worlds available at the moment. Check back later!</p>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                            {openWorlds.map(world => (
+                                <WorldCard key={world.id} world={world} onJoin={handleJoinClick} />
+                            ))}
+                        </div>
+                    )}
+                </>
+            )}
+            {/* Dialog for password-protected worlds */}
+            <JoinWorldDialog 
+                world={selectedWorldForJoin} 
+                onOpenChange={(isOpen) => !isOpen && setSelectedWorldForJoin(null)} // Close dialog
+            />
+        </div>
+    );
+};
+
+export default OpenWorldPage;
+
+// -- src/pages/WorldInstancePage.tsx
+import * as React from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useWorldStore } from '@/store/worldStore';
+import { WorldCanvas } from '@/components/world/WorldCanvas';
+import { Spinner } from '@/components/ui/Spinner';
+import { Button } from '@/components/ui/Button';
+import { ArrowLeft } from 'lucide-react';
+import { startWorldSimulation, stopWorldSimulation } from '@/lib/simulation';
+import { WorldChat } from '@/components/world/WorldChat';
+import { useAuthStore } from '@/store/authStore';
+
+const WorldInstancePage: React.FC = () => {
+    const { worldId } = useParams<{ worldId: string }>();
+    const navigate = useNavigate();
+    const { 
+        currentWorld, 
+        playersInWorld, 
+        leaveWorld, 
+        addPlayer, 
+        updatePlayerPosition, 
+        removePlayer, 
+        addWorldMessage, 
+        error, 
+        clearError 
+    } = useWorldStore();
+    const { isAuthenticated } = useAuthStore();
+
+    // Dynamically get canvas dimensions for simulation bounds
+    const [canvasDimensions, setCanvasDimensions] = React.useState({ width: 0, height: 0 });
+    const canvasContainerRef = React.useRef<HTMLDivElement>(null);
+
+
+    React.useEffect(() => {
+        if (!worldId || !isAuthenticated) {
+            navigate('/open-world'); // Redirect if no worldId or not authenticated
+            return;
+        }
+
+        const handleResize = () => {
+            if (canvasContainerRef.current) {
+                setCanvasDimensions({
+                    width: canvasContainerRef.current.clientWidth,
+                    height: canvasContainerRef.current.clientHeight,
+                });
+            }
+        };
+
+        handleResize(); // Initial set
+        window.addEventListener('resize', handleResize);
+
+        // Start simulation when entering a world
+        if (worldId && currentWorld?.id === worldId && canvasDimensions.width > 0 && canvasDimensions.height > 0) {
+            startWorldSimulation(
+                worldId,
+                addPlayer,
+                updatePlayerPosition,
+                addWorldMessage,
+                canvasDimensions.width,
+                canvasDimensions.height
+            );
+        }
+        
+        return () => {
+            stopWorldSimulation();
+            leaveWorld();
+            window.removeEventListener('resize', handleResize);
+            clearError(); // Clear any world-specific errors on unmount
+        };
+    }, [
+        worldId, 
+        navigate, 
+        isAuthenticated, 
+        currentWorld, // Only re-run if currentWorld changes
+        leaveWorld, 
+        addPlayer, 
+        updatePlayerPosition, 
+        removePlayer, 
+        addWorldMessage,
+        canvasDimensions.width,
+        canvasDimensions.height,
+        clearError
+    ]);
+
+    if (!currentWorld || currentWorld.id !== worldId) {
+        return (
+            <div className="h-screen w-full flex items-center justify-center bg-black" role="status" aria-label="Loading world">
+                <Spinner size="lg" />
+            </div>
+        );
+    }
+    
+    // Display error if any
+    if (error) {
+        return (
+            <div className="h-screen w-full flex flex-col items-center justify-center bg-background-primary text-status-error p-4">
+                <p className="text-xl mb-4">Error: {error}</p>
+                <Button onClick={() => navigate('/open-world')}>Back to Worlds</Button>
+            </div>
+        );
+    }
+
+    return (
+        <div ref={canvasContainerRef} id="world-canvas-container" className="h-screen w-full bg-black relative overflow-hidden">
+            <Button
+                variant="ghost"
+                className="absolute top-4 left-4 z-10 text-white bg-black/50 hover:bg-black/80 hover:text-white"
+                onClick={() => navigate('/open-world')}
+                aria-label="Back to Open Worlds selection"
+            >
+                <ArrowLeft className="mr-2 h-4 w-4" /> Back to Worlds
+            </Button>
+            {/* WorldCanvas will take the dimensions of its parent container */}
+            <WorldCanvas players={playersInWorld} />
+            <WorldChat />
+        </div>
+    );
+};
+
+export default WorldInstancePage;
+
+
+// -- src/components/auth/AuthPage.tsx
+import * as React from 'react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs';
+import { LoginForm } from './LoginForm';
+import { SignUpForm } from './SignUpForm';
+
+/**
+ * The main authentication page component.
+ * It uses tabs to switch between the Login and Sign Up forms.
+ */
+export const AuthPage: React.FC = () => {
+  return (
+    <Tabs defaultValue="login" className="w-full" aria-label="Authentication forms">
+      <TabsList className="grid w-full grid-cols-2">
+        <TabsTrigger value="login" aria-controls="login-form-content">Login</TabsTrigger>
+        <TabsTrigger value="signup" aria-controls="signup-form-content">Sign Up</TabsTrigger>
+      </TabsList>
+      <TabsContent value="login" id="login-form-content">
+        <LoginForm />
+      </TabsContent>
+      <TabsContent value="signup" id="signup-form-content">
+        <SignUpForm />
+      </TabsContent>
+    </Tabs>
+  );
+};
+
+// -- src/components/auth/LoginForm.tsx
+import * as React from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import * as z from 'zod';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card';
+import { useAuth } from '@/hooks/useAuth';
+import { Spinner } from '../ui/Spinner';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '@/lib/db';
+import type { User } from '@/types';
+
+const loginSchema = z.object({
+  email: z.string().email('Invalid email address'),
+  password: z.string().min(1, 'Password is required'),
+});
+
+type LoginFormValues = z.infer<typeof loginSchema>;
+
+/**
+ * Renders the login form, including email/password fields and quick login buttons.
+ * Handles form submission, validation, and displays loading/error states.
+ */
+export const LoginForm: React.FC = () => {
+  const { login, quickLogin, isLoading, error, clearError } = useAuth();
+  const { register, handleSubmit, formState: { errors } } = useForm<LoginFormValues>({
+    resolver: zodResolver(loginSchema),
+  });
+  
+  const quickLoginUsers = useLiveQuery(
+    () => db.users.where('email').anyOf('alice@quikchat.dev', 'bob@quikchat.dev', 'charlie@quikchat.dev', 'diana@quikchat.dev').toArray(), []
+  ) as User[] | undefined;
+
+
+  const onSubmit = async (data: LoginFormValues) => {
+    try {
+        clearError(); // Clear previous errors on new submission
+        await login(data.email, data.password);
+    } catch (err) {
+        // Error is handled by the authStore, no need to do anything here except console log
+        console.error("Login attempt failed:", err);
+    }
+  };
+  
+  // Clear error when component unmounts
+  React.useEffect(() => {
+    return () => {
+      clearError();
+    };
+  }, [clearError]);
+
+  return (
+    <Card aria-labelledby="login-card-title">
+      <CardHeader>
+        <CardTitle id="login-card-title">Login</CardTitle>
+        <CardDescription>Enter your credentials to access your account.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" aria-live="polite">
+          <div className="space-y-1">
+            <Input
+              id="email"
+              placeholder="Email"
+              {...register('email')}
+              disabled={isLoading}
+              aria-invalid={errors.email ? "true" : "false"}
+              aria-describedby="email-error"
+            />
+            {errors.email && <p id="email-error" className="text-sm text-status-error">{errors.email.message}</p>}
+          </div>
+          <div className="space-y-1">
+            <Input
+              id="password"
+              type="password"
+              placeholder="Password"
+              {...register('password')}
+              disabled={isLoading}
+              aria-invalid={errors.password ? "true" : "false"}
+              aria-describedby="password-error"
+            />
+            {errors.password && <p id="password-error" className="text-sm text-status-error">{errors.password.message}</p>}
+          </div>
+          {error && <p className="text-sm text-status-error text-center" role="alert">{error}</p>}
+          <Button type="submit" className="w-full" disabled={isLoading} aria-label="Login">
+            {isLoading ? <Spinner size="sm" /> : 'Login'}
+          </Button>
+        </form>
+        <div className="mt-4" role="group" aria-label="Quick login options">
+          <p className="text-center text-sm text-text-secondary mb-2">Or quick login as:</p>
+          <div className="grid grid-cols-2 gap-2">
+            {quickLoginUsers?.map(user => (
+              <Button key={user.id} variant="outline" onClick={() => quickLogin(user.id)} disabled={isLoading} aria-label={`Quick login as ${user.name}`}>
+                {user.name}
+              </Button>
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
+// -- src/components/auth/SignUpForm.tsx
+import * as React from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import * as z from 'zod';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card';
+import { useAuth } from '@/hooks/useAuth';
+import { Spinner } from '../ui/Spinner';
+
+const signUpSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters'),
+  email: z.string().email('Invalid email address'),
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+});
+
+type SignUpFormValues = z.infer<typeof signUpSchema>;
+
+/**
+ * Renders the sign-up form for new user registration.
+ * Handles form submission, validation, and displays loading/error states.
+ */
+export const SignUpForm: React.FC = () => {
+  const { register: registerUser, isLoading, error, clearError } = useAuth();
+  const { register, handleSubmit, formState: { errors } } = useForm<SignUpFormValues>({
+    resolver: zodResolver(signUpSchema),
+  });
+
+  const onSubmit = async (data: SignUpFormValues) => {
+    try {
+        clearError(); // Clear previous errors on new submission
+        await registerUser(data.name, data.email, data.password);
+    } catch (err) {
+        // Error is handled by the authStore
+        console.error("Registration failed:", err);
+    }
+  };
+  
+  // Clear error when component unmounts
+  React.useEffect(() => {
+    return () => {
+      clearError();
+    };
+  }, [clearError]);
+
+  return (
+    <Card aria-labelledby="signup-card-title">
+      <CardHeader>
+        <CardTitle id="signup-card-title">Sign Up</CardTitle>
+        <CardDescription>Create a new account to start chatting.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" aria-live="polite">
+          <div className="space-y-1">
+            <Input
+              id="name"
+              placeholder="Name"
+              {...register('name')}
+              disabled={isLoading}
+              aria-invalid={errors.name ? "true" : "false"}
+              aria-describedby="name-error"
+            />
+            {errors.name && <p id="name-error" className="text-sm text-status-error">{errors.name.message}</p>}
+          </div>
+          <div className="space-y-1">
+            <Input
+              id="email"
+              placeholder="Email"
+              {...register('email')}
+              disabled={isLoading}
+              aria-invalid={errors.email ? "true" : "false"}
+              aria-describedby="email-error"
+            />
+            {errors.email && <p id="email-error" className="text-sm text-status-error">{errors.email.message}</p>}
+          </div>
+          <div className="space-y-1">
+            <Input
+              id="password"
+              type="password"
+              placeholder="Password"
+              {...register('password')}
+              disabled={isLoading}
+              aria-invalid={errors.password ? "true" : "false"}
+              aria-describedby="password-error"
+            />
+            {errors.password && <p id="password-error" className="text-sm text-status-error">{errors.password.message}</p>}
+          </div>
+          {error && <p className="text-sm text-status-error text-center" role="alert">{error}</p>}
+          <Button type="submit" className="w-full" disabled={isLoading} aria-label="Create account">
+            {isLoading ? <Spinner size="sm" /> : 'Create Account'}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+};
+
+// -- src/components/chat/ChatView.tsx
+import * as React from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useChatStore } from '@/store/chatStore';
+import { useAuth } from '@/hooks/useAuth';
+import type { Chat, User, Message as MessageType } from '@/types';
+import { db } from '@/lib/db';
+import { getChatPartner } from '@/lib/api';
+import { Message } from './Message';
+import { MessageInput } from './MessageInput';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Skeleton } from '../ui/Skeleton';
+import { Spinner } from '../ui/Spinner';
+import { Button } from '../ui/Button';
+import { GroupSettingsDialog } from './GroupSettingsDialog';
+
+
+/**
+ * The main view for a single chat conversation, including header, virtualized message list, and input.
+ */
+export const ChatView: React.FC = () => {
+    const { activeChatId } = useChatStore();
+    const { currentUser } = useAuth();
+    const [chatInfo, setChatInfo] = React.useState<{ name: string; avatar?: string; status: string; isGroup: boolean } | null>(null);
+    const [isGroupSettingsOpen, setIsGroupSettingsOpen] = React.useState(false);
+
+    React.useEffect(() => {
+        const fetchChatInfo = async () => {
+            if (!activeChatId || !currentUser) return;
+            const chat = await db.chats.get(activeChatId);
+            if (!chat) return;
+
+            if (chat.isGroup) {
+                // Fetch all participant details for group chat for robust display
+                const participants = await db.users.bulkGet(chat.participantIds);
+                const participantNames = participants.filter(Boolean).map(p => p!.name);
+
+                setChatInfo({
+                    name: chat.name || 'Group Chat',
+                    avatar: chat.avatar,
+                    status: `${participantNames.length} members`,
+                    isGroup: true,
+                });
+            } else {
+                const partner = await getChatPartner(chat, currentUser.id);
+                setChatInfo({
+                    name: partner?.name || 'Unknown User',
+                    avatar: partner?.avatar,
+                    status: partner?.isOnline ? 'Online' : 'Offline',
+                    isGroup: false,
+                });
+            }
+        };
+        fetchChatInfo();
+    }, [activeChatId, currentUser]);
+
+    if (!activeChatId) {
+        return (
+            <div className="flex h-full flex-col items-center justify-center text-text-secondary">
+                <p>No chat selected.</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex flex-col h-full" aria-label={`Chat with ${chatInfo?.name || 'Loading...'}`}>
+            <ChatHeader 
+                info={chatInfo} 
+                isGroup={chatInfo?.isGroup} 
+                onHeaderClick={() => chatInfo?.isGroup && setIsGroupSettingsOpen(true)}
+            />
+            <MessageList />
+            <MessageInput />
+            {chatInfo?.isGroup && activeChatId && (
+                <GroupSettingsDialog 
+                    chatId={activeChatId} 
+                    isOpen={isGroupSettingsOpen} 
+                    onOpenChange={setIsGroupSettingsOpen} 
+                />
+            )}
+        </div>
+    );
+};
+
+interface ChatHeaderProps {
+    info: { name: string; avatar?: string; status: string; isGroup?: boolean } | null;
+    isGroup?: boolean;
+    onHeaderClick: () => void;
+}
+
+const ChatHeader: React.FC<ChatHeaderProps> = ({ info, isGroup, onHeaderClick }) => {
+    if (!info) {
+        return (
+            <div className="p-4 border-b border-border flex items-center bg-background-primary">
+                <Skeleton className="h-10 w-10 rounded-full" />
+                <div className="ml-3 space-y-1">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                </div>
+            </div>
+        );
+    }
+
+    const headerContent = (
+        <div className="flex items-center flex-1 min-w-0">
+            <Avatar className="h-9 w-9">
+                <AvatarImage src={info.avatar} alt={`Avatar of ${info.name}`} />
+                <AvatarFallback>{info.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="ml-3 flex-1 min-w-0">
+                <p className="font-semibold text-text-primary truncate">{info.name}</p>
+                <p className="text-xs text-text-secondary truncate">{info.status}</p>
+            </div>
+        </div>
+    );
+    
+    return (
+        <div className="p-2 border-b border-border bg-background-primary flex items-center" role="banner">
+            {isGroup ? (
+                <button 
+                    onClick={onHeaderClick} 
+                    className="w-full text-left rounded-md hover:bg-background-secondary p-2 -m-2 flex items-center"
+                    aria-label={`Open settings for group chat ${info.name}`}
+                >
+                    {headerContent}
+                </button>
+            ) : (
+                <div className="w-full p-2 -m-2">
+                    {headerContent}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const MessageList: React.FC = () => {
+    const { messages, messagesLoading, hasMoreMessages, loadMoreMessages } = useChatStore();
+    const parentRef = React.useRef<HTMLDivElement>(null);
+    const count = messages.length;
+
+    const rowVirtualizer = useVirtualizer({
+        count,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => 70, // Estimate row height
+        overscan: 5,
+        // Always maintain scroll to bottom unless user has scrolled up
+        scrollToFn: (offset, defaultScrollToFn) => {
+            const scrollElement = parentRef.current;
+            if (scrollElement) {
+                const isAtBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 1;
+                if (isAtBottom || (offset > scrollElement.scrollTop && messages.length > 0)) {
+                    // Only smooth scroll to new messages at bottom, otherwise jump
+                    defaultScrollToFn(offset, { behavior: 'smooth' });
+                } else {
+                    defaultScrollToFn(offset, { behavior: 'auto' });
+                }
+            } else {
+                 defaultScrollToFn(offset, { behavior: 'auto' });
+            }
+        },
+    });
+
+    // Scroll to bottom when new messages are added, but only if already at bottom or new messages are from me
+    const isAtBottom = React.useRef(true);
+    React.useLayoutEffect(() => {
+        const scrollElement = parentRef.current;
+        if (scrollElement) {
+            isAtBottom.current = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 10; // Threshold
+        }
+    }, [messages]);
+
+    React.useEffect(() => {
+        if (rowVirtualizer && count > 0 && isAtBottom.current) {
+            rowVirtualizer.scrollToIndex(count - 1, { align: 'end', smoothScroll: true });
+        }
+    }, [count, rowVirtualizer]);
+
+    const handleScroll = React.useCallback(() => {
+        const scrollElement = parentRef.current;
+        if (scrollElement) {
+             const scrollTop = scrollElement.scrollTop;
+             // If scrolled near the top and there are more messages to load
+            if (scrollTop < 100 && hasMoreMessages && !messagesLoading) {
+                loadMoreMessages();
+            }
+        }
+    }, [hasMoreMessages, messagesLoading, loadMoreMessages]);
+    
+    React.useEffect(() => {
+        const scrollElement = parentRef.current;
+        scrollElement?.addEventListener('scroll', handleScroll);
+        return () => scrollElement?.removeEventListener('scroll', handleScroll);
+    }, [handleScroll]);
+
+
+    return (
+        <div ref={parentRef} className="flex-1 overflow-y-auto p-4 flex flex-col-reverse" aria-label="Message history">
+            {messagesLoading && messages.length === 0 && <div className="flex justify-center items-center h-full"><Spinner /></div>}
+            
+            <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+                {hasMoreMessages && (
+                    <div className="flex justify-center py-2" role="status">
+                        <Button variant="outline" size="sm" onClick={loadMoreMessages} disabled={messagesLoading}>
+                            {messagesLoading ? <Spinner size="sm" /> : 'Load More'}
+                        </Button>
+                    </div>
+                )}
+
+                {rowVirtualizer.getVirtualItems().map(virtualItem => {
+                    const message = messages[virtualItem.index];
+                    // Logic to determine if avatar should be shown (e.g., if sender changes or it's the first message)
+                    const prevMessage = messages[virtualItem.index - 1];
+                    const showAvatar = !prevMessage || prevMessage.senderId !== message.senderId || (message.timestamp.getTime() - prevMessage.timestamp.getTime() > 1000 * 60 * 5); // New sender or 5 min gap
+
+                    return (
+                        <div
+                            key={virtualItem.key}
+                            data-index={virtualItem.index} // For debugging virtualizer
+                            ref={rowVirtualizer.measureElement} // Essential for dynamic row heights
+                            style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                width: '100%',
+                                transform: `translateY(${virtualItem.start}px)`, // No height here, let content dictate
+                            }}
+                        >
+                            <Message message={message} showAvatar={showAvatar} />
+                        </div>
+                    );
+                })}
+            </div>
+             {!messagesLoading && messages.length === 0 && (
+                <div className="text-center text-text-secondary py-4" role="status">No messages yet. Say hello!</div>
+            )}
+        </div>
+    );
+};
+
+// -- src/components/chat/CreateChatDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogClose } from '@/components/ui/Dialog';
+import { Button } from '../ui/Button';
+import { useFriendStore } from '@/store/friendStore';
+import { useAuth } from '@/hooks/useAuth';
+import * as api from '@/lib/api';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Input } from '../ui/Input';
+import { useChatStore } from '@/store/chatStore';
+import { Plus } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
+import { ScrollArea } from '../ui/ScrollArea';
+
+interface CreateChatDialogProps {
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const CreateChatDialog: React.FC<CreateChatDialogProps> = ({ isOpen, onOpenChange }) => {
+    const { myFriends, fetchMyFriends, isLoading: friendsLoading } = useFriendStore();
+    const { currentUser } = useAuth();
+    const setActiveChatId = useChatStore(state => state.setActiveChatId);
+
+    const [selectedFriendIds, setSelectedFriendIds] = React.useState<string[]>([]);
+    const [step, setStep] = React.useState(1); // 1: Select friends, 2: Name group
+    const [groupName, setGroupName] = React.useState('');
+    const [isCreatingChat, setIsCreatingChat] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+
+    React.useEffect(() => {
+        if (isOpen) {
+            fetchMyFriends();
+            setError(null);
+        } else {
+            // Reset state on close
+            setSelectedFriendIds([]);
+            setStep(1);
+            setGroupName('');
+            setError(null);
+        }
+    }, [isOpen, fetchMyFriends]);
+
+    const handleToggleFriend = (friendId: string) => {
+        setSelectedFriendIds(prev =>
+            prev.includes(friendId) ? prev.filter(id => id !== friendId) : [...prev, friendId]
+        );
+    };
+
+    const handleNext = () => {
+        if (selectedFriendIds.length > 1) {
+            setStep(2);
+        } else {
+            handleCreateChat(); // For 1-on-1 chat
+        }
+    };
+    
+    const handleCreateChat = async () => {
+        if (!currentUser || selectedFriendIds.length === 0) return;
+        setIsCreatingChat(true);
+        setError(null);
+        try {
+            const newChat = await api.createChat(selectedFriendIds, currentUser.id, groupName.trim() || undefined);
+            setActiveChatId(newChat.id); // Set the new chat as active
+            onOpenChange(false); // Close dialog
+        } catch (e) {
+            console.error("Failed to create chat", e);
+            setError(e instanceof Error ? e.message : "Failed to create chat. Please try again.");
+        } finally {
+            setIsCreatingChat(false);
+        }
+    };
+
+    const isGroupChatCreation = selectedFriendIds.length > 1;
+    const canProceed = selectedFriendIds.length > 0 && !isCreatingChat;
+
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent aria-labelledby="create-chat-dialog-title">
+                <DialogHeader>
+                    <DialogTitle id="create-chat-dialog-title">{step === 1 ? 'Start a New Chat' : 'Name Your Group'}</DialogTitle>
+                </DialogHeader>
+                {step === 1 ? (
+                    <ScrollArea className="max-h-80 min-h-[150px] space-y-2 py-2" aria-label="Select friends for new chat">
+                        {friendsLoading ? (
+                            <div className="flex justify-center py-4"><Spinner /></div>
+                        ) : myFriends.length === 0 ? (
+                            <p className="text-sm text-center text-text-secondary p-4">You have no friends yet. Add some to start chatting!</p>
+                        ) : (
+                            myFriends.map(friend => (
+                                <div key={friend.id} onClick={() => handleToggleFriend(friend.id)}
+                                    className={`flex items-center gap-3 p-2 rounded-md cursor-pointer 
+                                                ${selectedFriendIds.includes(friend.id) ? 'bg-primary-accent/20' : 'hover:bg-background-secondary'}`}
+                                    role="checkbox"
+                                    aria-checked={selectedFriendIds.includes(friend.id)}
+                                    tabIndex={0}
+                                >
+                                    <Avatar><AvatarImage src={friend.avatar} alt={`Avatar of ${friend.name}`} /><AvatarFallback>{friend.name[0]}</AvatarFallback></Avatar>
+                                    <span className="font-medium text-text-primary">{friend.name}</span>
+                                    {selectedFriendIds.includes(friend.id) && <Plus className="ml-auto h-4 w-4 rotate-45 text-primary-accent" />}
+                                </div>
+                            ))
+                        )}
+                    </ScrollArea>
+                ) : (
+                    <div className="space-y-2">
+                        <Input 
+                            placeholder="Enter group name (optional)" 
+                            value={groupName} 
+                            onChange={(e) => setGroupName(e.target.value)} 
+                            disabled={isCreatingChat}
+                            aria-label="Group name input"
+                        />
+                        <p className="text-sm text-text-secondary">Selected: {selectedFriendIds.length} friend(s)</p>
+                    </div>
+                )}
+                {error && <p className="text-sm text-status-error text-center" role="alert">{error}</p>}
+                <DialogFooter>
+                    <DialogClose asChild><Button variant="ghost" disabled={isCreatingChat}>Cancel</Button></DialogClose>
+                    <Button onClick={step === 1 ? handleNext : handleCreateChat} disabled={!canProceed || (step === 2 && isGroupChatCreation && !groupName.trim())}>
+                        {isCreatingChat ? <Spinner size="sm"/> : (step === 1 && isGroupChatCreation ? 'Next' : 'Create Chat')}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/chat/GroupSettingsDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog';
+import { Button } from '../ui/Button';
+import { useAuth } from '@/hooks/useAuth';
+import * as api from '@/lib/api';
+import { useChatStore } from '@/store/chatStore';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '@/lib/db';
+import type { Chat, User } from '@/types';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Input } from '../ui/Input';
+import { Save, Plus, Trash2, Crown } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
+import { ScrollArea } from '../ui/ScrollArea';
+
+interface GroupSettingsDialogProps {
+    chatId: string;
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const GroupSettingsDialog: React.FC<GroupSettingsDialogProps> = ({ chatId, isOpen, onOpenChange }) => {
+    const { currentUser } = useAuth();
+    const { setActiveChatId } = useChatStore();
+    const groupChat = useLiveQuery(() => db.chats.get(chatId), [chatId]) as Chat | undefined;
+    
+    const [groupName, setGroupName] = React.useState(groupChat?.name || '');
+    const [isEditingName, setIsEditingName] = React.useState(false);
+    const [isSaving, setIsSaving] = React.useState(false);
+    const [isLeaving, setIsLeaving] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+
+    // Fetch participants
+    const participants = useLiveQuery(
+        async () => {
+            if (!groupChat?.participantIds.length) return [];
+            return await db.users.bulkGet(groupChat.participantIds);
+        },
+        [groupChat?.participantIds]
+    ) as User[] | undefined;
+
+    React.useEffect(() => {
+        if (groupChat?.name) {
+            setGroupName(groupChat.name);
+        }
+    }, [groupChat?.name]);
+
+    const isCreator = currentUser?.id === groupChat?.creatorId;
+
+    const handleUpdateGroupName = async () => {
+        if (!groupName.trim() || !groupChat || !currentUser || !isCreator) return;
+        setIsSaving(true);
+        setError(null);
+        try {
+            await api.updateGroupChat(groupChat.id, { name: groupName.trim() }, currentUser.id);
+            setIsEditingName(false);
+            alert("Group name updated!");
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Failed to update group name.");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleLeaveGroup = async () => {
+        if (!currentUser || !groupChat) return;
+        if (!window.confirm(`Are you sure you want to leave "${groupChat.name || 'this group'}"?`)) return;
+
+        setIsLeaving(true);
+        setError(null);
+        try {
+            await api.leaveGroup(groupChat.id, currentUser.id);
+            setActiveChatId(null); // Clear active chat if current user leaves
+            onOpenChange(false);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Failed to leave group.");
+        } finally {
+            setIsLeaving(false);
+        }
+    };
+
+    const handleRemoveMember = async (memberId: string, memberName: string) => {
+        if (!currentUser || !groupChat) return;
+        if (!window.confirm(`Are you sure you want to remove ${memberName} from the group?`)) return;
+
+        try {
+            await api.removeGroupMember(groupChat.id, memberId, currentUser.id);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : `Failed to remove ${memberName}.`);
+        }
+    };
+
+    const handleAddMember = () => {
+        // This would ideally open a separate "Add Members" dialog
+        alert("Adding members feature not implemented in detail yet. This would open a dialog to select friends to add.");
+    };
+
+    if (!groupChat) {
+        return (
+            <Dialog open={isOpen} onOpenChange={onOpenChange}>
+                 <DialogContent><div className="flex justify-center py-4"><Spinner /></div></DialogContent>
+            </Dialog>
+        )
+    }
+
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent aria-labelledby="group-settings-dialog-title">
+                <DialogHeader>
+                    <DialogTitle id="group-settings-dialog-title">{groupChat.name || 'Group Settings'}</DialogTitle>
+                    <DialogDescription>Manage members and group details.</DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4">
+                    {/* Group Name */}
+                    <div className="flex items-center gap-2">
+                        {isEditingName && isCreator ? (
+                            <>
+                                <Input 
+                                    value={groupName} 
+                                    onChange={e => setGroupName(e.target.value)} 
+                                    disabled={isSaving}
+                                    aria-label="Edit group name"
+                                />
+                                <Button size="icon" onClick={handleUpdateGroupName} disabled={isSaving}>
+                                    {isSaving ? <Spinner size="sm" /> : <Save className="h-4 w-4" />}
+                                </Button>
+                                <Button variant="ghost" size="icon" onClick={() => { setIsEditingName(false); setGroupName(groupChat.name || ''); }} disabled={isSaving}>
+                                    <X className="h-4 w-4" />
+                                </Button>
+                            </>
+                        ) : (
+                            <h3 className="text-lg font-semibold flex-1">{groupChat.name || 'Group Chat'}</h3>
+                        )}
+                        {isCreator && !isEditingName && (
+                            <Button variant="ghost" size="sm" onClick={() => setIsEditingName(true)} aria-label="Edit group name">Edit</Button>
+                        )}
+                    </div>
+
+                    {/* Members List */}
+                    <div>
+                        <h4 className="font-semibold mb-2">Members ({participants?.length || 0})</h4>
+                        <ScrollArea className="h-40 border rounded-md">
+                            <div className="p-2 space-y-2">
+                                {participants?.map(member => member && (
+                                    <div key={member.id} className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <Avatar className="h-8 w-8"><AvatarImage src={member.avatar} /><AvatarFallback>{member.name[0]}</AvatarFallback></Avatar>
+                                            <span className="text-sm">{member.name}</span>
+                                            {member.id === groupChat.creatorId && <Crown className="h-4 w-4 text-yellow-500" title="Group Creator" />}
+                                        </div>
+                                        {isCreator && member.id !== currentUser?.id && ( // Creator can remove anyone but themselves
+                                            <Button 
+                                                variant="destructive" 
+                                                size="sm" 
+                                                onClick={() => handleRemoveMember(member.id, member.name)}
+                                                aria-label={`Remove ${member.name} from group`}
+                                            >
+                                                <Trash2 className="h-4 w-4"/>
+                                            </Button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </ScrollArea>
+                        {!isCreator && ( // Only non-creators can add members through this dialog
+                            <Button variant="outline" className="mt-2 w-full" onClick={handleAddMember} aria-label="Add members to group">
+                                <Plus className="h-4 w-4 mr-2" />Add Members
+                            </Button>
+                        )}
+                    </div>
+                </div>
+                {error && <p className="text-sm text-status-error text-center mt-4" role="alert">{error}</p>}
+                <DialogFooter>
+                    <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isSaving || isLeaving}>Close</Button>
+                    {!isCreator && ( // Only show leave button if not creator or if creator is last member
+                         <Button variant="destructive" onClick={handleLeaveGroup} disabled={isLeaving} aria-label="Leave group">
+                            {isLeaving ? <Spinner size="sm" /> : 'Leave Group'}
+                         </Button>
+                    )}
+                    {isCreator && groupChat.participantIds.length === 1 && groupChat.participantIds[0] === currentUser?.id && (
+                         <Button variant="destructive" onClick={handleLeaveGroup} disabled={isLeaving} aria-label="Delete group">
+                            {isLeaving ? <Spinner size="sm" /> : 'Delete Group'}
+                         </Button>
+                    )}
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/chat/Message.tsx
+import * as React from 'react';
+import { Check, CheckCheck } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { Message as MessageType, MessageStatus, User } from '@/types';
+import { useAuthStore } from '@/store/authStore';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { db } from '@/lib/db';
+
+interface MessageProps {
+    message: MessageType;
+    showAvatar: boolean;
+}
+
+/**
+ * Renders a single chat message bubble with appropriate styling for sender, status, and content.
+ */
+export const Message: React.FC<MessageProps> = React.memo(({ message, showAvatar }) => {
+    const { currentUser } = useAuthStore();
+    const [sender, setSender] = React.useState<User | null>(null);
+
+    const isCurrentUser = message.senderId === currentUser?.id;
+    const isEvent = message.isEvent;
+
+    // Fetch sender details only if it's not the current user and not a system message
+    React.useEffect(() => {
+        if (!isCurrentUser && !isEvent && message.senderId && message.senderId !== 'system') {
+            db.users.get(message.senderId).then(user => setSender(user || null));
+        }
+    }, [message.senderId, isCurrentUser, isEvent]);
+
+    if (isEvent) {
+        return (
+            <div className="text-center text-xs text-text-secondary my-2" role="log" aria-live="polite">
+                {message.content}
+            </div>
+        );
+    }
+
+    const messageDate = message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const tooltipDate = message.timestamp.toLocaleString();
+
+    return (
+        <div 
+            className={cn("flex items-end gap-2 my-1", isCurrentUser ? "justify-end" : "justify-start")}
+            role="listitem"
+            aria-label={`Message from ${isCurrentUser ? 'you' : sender?.name || 'unknown user'} at ${tooltipDate}`}
+        >
+            {!isCurrentUser && (
+                <div className="w-8 flex-shrink-0">
+                    {showAvatar && sender && (
+                        <Avatar className="h-8 w-8">
+                            <AvatarImage src={sender.avatar} alt={`Avatar of ${sender.name}`} loading="lazy" />
+                            <AvatarFallback>{sender.name.charAt(0)}</AvatarFallback>
+                        </Avatar>
+                    )}
+                </div>
+            )}
+            <TooltipProvider>
+                <Tooltip delayDuration={300}>
+                    <TooltipTrigger asChild>
+                        <div className={cn(
+                            "max-w-[70%] p-2 px-3 rounded-lg flex flex-col break-words",
+                            isCurrentUser ? "bg-primary-accent text-white rounded-br-none" : "bg-background-secondary text-text-primary rounded-bl-none",
+                            isCurrentUser && !showAvatar && "mr-8", // Push my message left if no avatar placeholder
+                            !isCurrentUser && !showAvatar && "ml-8" // Push other's message right if no avatar placeholder
+                        )}>
+                            {!isCurrentUser && showAvatar && sender && (
+                                <p className="text-xs font-semibold text-secondary-accent mb-1" aria-hidden="true">{sender.name}</p>
+                            )}
+                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                            <div className="flex items-center justify-end gap-1 self-end mt-1 text-xs opacity-70">
+                                <span aria-hidden="true">{messageDate}</span>
+                                {isCurrentUser && <MessageStatusIcon status={message.status} />}
+                            </div>
+                        </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                        <p>{tooltipDate}</p>
+                    </TooltipContent>
+                </Tooltip>
+            </TooltipProvider>
+            {isCurrentUser && ( // Add empty div for alignment if my avatar is not shown
+                 <div className="w-8 flex-shrink-0">
+                    {showAvatar && currentUser && (
+                        <Avatar className="h-8 w-8">
+                            <AvatarImage src={currentUser.avatar} alt={`Avatar of ${currentUser.name}`} loading="lazy" />
+                            <AvatarFallback>{currentUser.name.charAt(0)}</AvatarFallback>
+                        </Avatar>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+});
+Message.displayName = 'Message'; // For React DevTools
+
+const MessageStatusIcon: React.FC<{ status?: MessageStatus }> = ({ status }) => {
+    if (status === 'sent') return <Check className="h-4 w-4" aria-label="Message sent" />;
+    if (status === 'delivered') return <CheckCheck className="h-4 w-4" aria-label="Message delivered" />;
+    if (status === 'seen') return <CheckCheck className="h-4 w-4 text-blue-400" aria-label="Message seen" />;
+    return null;
+};
+
+// -- src/components/chat/MessageInput.tsx
+import * as React from 'react';
+import { Smile, Send } from 'lucide-react';
+import TextareaAutosize from 'react-textarea-autosize';
+import { Button } from '../ui/Button';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { useChatStore } from '@/store/chatStore';
+import { useAuthStore } from '@/store/authStore';
+
+// Simple list of emojis for the picker
+const EMOJIS = ['😀', '😂', '😍', '🤔', '👍', '❤️', '🙏', '🎉', '🔥', '💯', '✨', '👋', '🙏', '🤯', '🥳'];
+
+/**
+ * Renders the message input component with an emoji picker and send button.
+ */
+export const MessageInput: React.FC = () => {
+    const [message, setMessage] = React.useState('');
+    const sendMessage = useChatStore((state) => state.sendMessage);
+    const { currentUser } = useAuthStore();
+    const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
+
+    const handleSend = () => {
+        if (message.trim() && currentUser) {
+            sendMessage(message);
+            setMessage('');
+            setIsEmojiPickerOpen(false); // Close picker after sending
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault(); // Prevent new line
+            handleSend();
+        }
+    };
+
+    const addEmoji = (emoji: string) => {
+        setMessage(prev => prev + emoji);
+        // Optionally keep picker open for multiple emojis, or close it here
+        // setIsEmojiPickerOpen(false);
+    };
+
+    return (
+        <div className="p-4 bg-background-secondary border-t border-border flex items-end gap-2" role="form" aria-label="Message composer">
+            <div className="flex-1 flex items-center bg-background-primary rounded-lg border border-border p-1">
+                <Popover open={isEmojiPickerOpen} onOpenChange={setIsEmojiPickerOpen}>
+                    <PopoverTrigger asChild>
+                        <Button 
+                            variant="ghost" 
+                            size="icon" 
+                            className="h-8 w-8 flex-shrink-0"
+                            aria-label="Open emoji picker"
+                            disabled={!currentUser}
+                        >
+                            <Smile className="h-5 w-5 text-text-secondary" />
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-2" side="top" align="start">
+                        <div className="grid grid-cols-6 gap-1 max-w-[200px]">
+                            {EMOJIS.map(emoji => (
+                                <button 
+                                    key={emoji} 
+                                    onClick={() => addEmoji(emoji)} 
+                                    className="text-2xl rounded-md hover:bg-background-secondary p-1"
+                                    aria-label={`Insert emoji ${emoji}`}
+                                >
+                                    {emoji}
+                                </button>
+                            ))}
+                        </div>
+                    </PopoverContent>
+                </Popover>
+
+                <TextareaAutosize
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={currentUser ? "Type a message..." : "Log in to send messages"}
+                    maxRows={5}
+                    className="flex-1 bg-transparent resize-none focus:outline-none text-sm mx-2 py-1.5"
+                    aria-label="Message content"
+                    disabled={!currentUser}
+                />
+            </div>
+            <Button 
+                onClick={handleSend} 
+                size="icon" 
+                disabled={!message.trim() || !currentUser}
+                aria-label="Send message"
+            >
+                <Send className="h-5 w-5" />
+            </Button>
+        </div>
+    );
+};
+
+// -- src/components/chat/Sidebar.tsx
+import * as React from 'react';
+import { Globe, LogOut, Plus, Settings, User as UserIcon, X } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+import { useChatStore } from '@/store/chatStore';
+import { Button } from '../ui/Button';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { ScrollArea } from '../ui/ScrollArea';
+import { Skeleton } from '../ui/Skeleton';
+import { db } from '@/lib/db';
+import { useLiveQuery } from 'dexie-react-hooks';
+import type { Chat, User } from '@/types';
+import { getChatPartner } from '@/lib/api';
+import { cn, timeAgo } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { useNavigate } from 'react-router-dom';
+
+interface SidebarProps {
+    onNewChat: () => void;
+    onSettings: () => void;
+    onCloseSidebar: () => void; // Added for responsive closing
+}
+
+/**
+ * The main sidebar component, containing the user menu, action icons, and the chat list.
+ */
+export const Sidebar: React.FC<SidebarProps> = ({ onNewChat, onSettings, onCloseSidebar }) => {
+  return (
+    // Responsive adjustments are applied by MainLayout's containing aside element
+    <div className="flex flex-col h-full">
+      <UserMenu onNewChat={onNewChat} onSettings={onSettings} onCloseSidebar={onCloseSidebar} />
+      <ChatList />
+    </div>
+  );
+};
+
+/**
+ * Renders the user menu at the top of the sidebar.
+ * Includes user avatar, name, and a popover for actions like logout.
+ */
+const UserMenu: React.FC<SidebarProps> = ({ onNewChat, onSettings, onCloseSidebar }) => {
+  const { currentUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
+  }
+
+  return (
+    <div className="p-2 flex justify-between items-center border-b border-border">
+        {/* Close button for mobile sidebar */}
+        <div className="md:hidden flex-shrink-0 mr-2">
+            <Button variant="ghost" size="icon" onClick={onCloseSidebar} aria-label="Close sidebar">
+                <X className="h-5 w-5" />
+            </Button>
+        </div>
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button variant="ghost" className="w-full justify-start h-auto p-2" aria-label={`Open user menu for ${currentUser?.name || 'current user'}`}>
+            <Avatar className="h-9 w-9 mr-3">
+              <AvatarImage src={currentUser?.avatar} alt={`Avatar of ${currentUser?.name}`} />
+              <AvatarFallback>{currentUser?.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="text-left flex-1 min-w-0"> {/* Use flex-1 min-w-0 for truncation */}
+              <p className="font-semibold text-sm truncate text-text-primary">{currentUser?.name}</p>
+            </div>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-56 p-2" align="start">
+          <Button variant="ghost" className="w-full justify-start" aria-label="View Profile">
+            <UserIcon className="mr-2 h-4 w-4" /> View Profile
+          </Button>
+          <Button variant="ghost" className="w-full justify-start text-status-error hover:text-status-error" onClick={handleLogout} aria-label="Log Out">
+            <LogOut className="mr-2 h-4 w-4" /> Log Out
+          </Button>
+        </PopoverContent>
+      </Popover>
+      <TooltipProvider delayDuration={100}>
+        <div className="flex items-center flex-shrink-0">
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={() => {
+                        navigate('/open-world');
+                        if (window.innerWidth < 768) onCloseSidebar(); // Close sidebar on mobile after navigation
+                    }} aria-label="Open World">
+                        <Globe className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Open World</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={onNewChat} aria-label="Start a new chat">
+                        <Plus className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>New Chat</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={onSettings} aria-label="Open settings">
+                        <Settings className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Settings</p></TooltipContent>
+            </Tooltip>
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+};
+
+/**
+ * Renders the scrollable list of chats.
+ * Uses Dexie's useLiveQuery for real-time updates.
+ */
+const ChatList: React.FC = () => {
+  const { currentUser } = useAuth();
+  const chats = useLiveQuery(
+    () => db.chats
+        .where('participantIds').equals(currentUser!.id)
+        .sortBy('lastMessage.timestamp')
+        .then(c => c.reverse()),
+    [currentUser?.id], // Depend on currentUser.id for re-fetching
+    [] as Chat[]
+  );
+  
+  if (!currentUser) return null;
+  const isLoading = chats.length === 0 && (chats as any)._state !== 2; // Check Dexie's internal state for loading
+
+  return (
+    <ScrollArea className="flex-1" aria-label="Chat conversations">
+      {isLoading && <ChatListSkeleton />}
+      {!isLoading && chats.length === 0 && (
+        <div className="p-4 text-center text-sm text-text-secondary" role="alert">
+          No chats yet. Start a new conversation!
+        </div>
+      )}
+      {!isLoading && chats.map(chat => (
+        <ChatItem key={chat.id} chat={chat} currentUserId={currentUser.id} />
+      ))}
+    </ScrollArea>
+  );
+};
+
+/**
+ * Renders a single chat item in the chat list.
+ */
+const ChatItem: React.FC<{ chat: Chat; currentUserId: string }> = ({ chat, currentUserId }) => {
+  const { activeChatId, setActiveChatId } = useChatStore();
+  const [partner, setPartner] = React.useState<User | null>(null);
+
+  React.useEffect(() => {
+    if (!chat.isGroup) {
+      getChatPartner(chat, currentUserId).then(p => setPartner(p || null));
+    }
+  }, [chat, currentUserId]);
+
+  const displayName = chat.isGroup ? chat.name : partner?.name;
+  const displayAvatar = chat.isGroup ? chat.avatar : partner?.avatar;
+  const isActive = chat.id === activeChatId;
+  
+  // When a chat is active, its unread count should be 0.
+  const unreadCount = isActive ? 0 : chat.unreadCount;
+
+  return (
+    <Button
+      variant="ghost"
+      onClick={() => setActiveChatId(chat.id)}
+      className={cn(
+        "w-full h-auto p-2 justify-start rounded-none",
+        isActive && "bg-primary-accent/10"
+      )}
+      aria-current={isActive ? 'page' : undefined}
+      aria-label={`Open chat with ${displayName || 'unknown user'}${unreadCount > 0 ? `, ${unreadCount} unread messages` : ''}`}
+    >
+      <Avatar className="h-11 w-11 mr-3">
+        <AvatarImage src={displayAvatar} alt={`Avatar of ${displayName}`} loading="lazy" />
+        <AvatarFallback>{displayName?.charAt(0)}</AvatarFallback>
+      </Avatar>
+      <div className="w-full overflow-hidden">
+        <div className="flex justify-between items-center">
+          <p className="font-semibold text-sm truncate text-text-primary">{displayName || '...'}</p>
+          {chat.lastMessage && <p className="text-xs text-text-secondary">{timeAgo(chat.lastMessage.timestamp)}</p>}
+        </div>
+        <div className="flex justify-between items-start">
+          <p className="text-xs text-text-secondary truncate pr-2">
+            {chat.lastMessage?.content || 'No messages yet'}
+          </p>
+          {unreadCount > 0 && (
+             <span className="bg-primary-accent text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center" aria-label={`${unreadCount} unread messages`}>
+                {unreadCount}
+             </span>
+          )}
+        </div>
+      </div>
+    </Button>
+  );
+};
+
+/**
+ * Renders a skeleton loading state for the chat list.
+ */
+const ChatListSkeleton: React.FC = () => {
+    return (
+        <div className="p-2 space-y-2" role="progressbar" aria-label="Loading chats">
+            {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center p-2">
+                    <Skeleton className="h-11 w-11 rounded-full" />
+                    <div className="ml-3 space-y-2 w-full">
+                        <div className="flex justify-between">
+                            <Skeleton className="h-4 w-2/5" />
+                            <Skeleton className="h-3 w-1/5" />
+                        </div>
+                        <Skeleton className="h-3 w-4/5" />
+                    </div>
+                </div>
+            ))}
+        </div>
+    )
+}
+
+// -- src/components/world/WorldCard.tsx
+import * as React from 'react';
+import type { OpenWorld } from '@/types';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { Button } from '../ui/Button';
+import { Users, Lock } from 'lucide-react'; // Added Lock icon
+
+interface WorldCardProps {
+    world: OpenWorld;
+    onJoin: (world: OpenWorld) => void;
+}
+
+export const WorldCard: React.FC<WorldCardProps> = ({ world, onJoin }) => {
+    return (
+        <Card className="flex flex-col" aria-label={`Open world: ${world.name}`}>
+            <CardHeader className="p-0">
+                <img 
+                    src={world.imageUrl} 
+                    alt={world.name} 
+                    className="rounded-t-lg aspect-video object-cover w-full h-40" 
+                    loading="lazy"
+                />
+            </CardHeader>
+            <CardContent className="p-4 flex-1">
+                <CardTitle className="text-xl mb-1 flex items-center">
+                    {world.name}
+                    {world.isPasswordProtected && <Lock className="h-4 w-4 ml-2 text-text-secondary" aria-label="Password protected" />}
+                </CardTitle>
+                <CardDescription className="line-clamp-3">{world.description}</CardDescription>
+            </CardContent>
+            <CardFooter className="p-4 flex justify-between items-center">
+                <div className="flex items-center text-sm text-text-secondary">
+                    <Users className="h-4 w-4 mr-2" aria-hidden="true" /> <span aria-label={`Population: ${world.population}`}>{world.population}</span>
+                </div>
+                <Button onClick={() => onJoin(world)} aria-label={`Join ${world.name}`}>Join World</Button>
+            </CardFooter>
+        </Card>
+    );
+};
+
+// -- src/components/world/JoinWorldDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
+import { Input } from '../ui/Input';
+import { Button } from '../ui/Button';
+import { useWorldStore } from '@/store/worldStore';
+import type { OpenWorld } from '@/types';
+import { useNavigate } from 'react-router-dom';
+import { Spinner } from '../ui/Spinner';
+
+interface JoinWorldDialogProps {
+    world: OpenWorld | null;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const JoinWorldDialog: React.FC<JoinWorldDialogProps> = ({ world, onOpenChange }) => {
+    const { joinWorld, isJoiningWorld, error, clearError } = useWorldStore();
+    const [password, setPassword] = React.useState('');
+    const navigate = useNavigate();
+
+    const handleJoin = async () => {
+        if (!world) return;
+        clearError(); // Clear previous errors
+        const success = await joinWorld(world.id, password);
+        if (success) {
+            onOpenChange(false);
+            navigate(`/open-world/${world.id}`);
+        }
+    };
+
+    // Clear state on dialog close or world change
+    React.useEffect(() => {
+        if (!world) {
+            setPassword('');
+            clearError();
+        }
+    }, [world, clearError]);
+
+
+    return (
+        <Dialog open={!!world} onOpenChange={onOpenChange}>
+            <DialogContent aria-labelledby="join-world-dialog-title">
+                <DialogHeader>
+                    <DialogTitle id="join-world-dialog-title">Join "{world?.name}"</DialogTitle>
+                    <DialogDescription>This world is password protected. Please enter the password to join.</DialogDescription>
+                </DialogHeader>
+                <div className="space-y-2">
+                    <Input
+                        type="password"
+                        placeholder="World Password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        disabled={isJoiningWorld}
+                        aria-label="World password"
+                        aria-invalid={!!error}
+                        aria-describedby="password-error-message"
+                    />
+                    {error && <p id="password-error-message" className="text-sm text-status-error" role="alert">{error}</p>}
+                </div>
+                <DialogFooter>
+                    <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isJoiningWorld}>Cancel</Button>
+                    <Button onClick={handleJoin} disabled={isJoiningWorld || !password.trim()} aria-label={`Join ${world?.name || 'world'}`}>
+                        {isJoiningWorld ? <Spinner size="sm" /> : 'Join'}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+};

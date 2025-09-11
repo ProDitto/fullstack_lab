@@ -1,0 +1,704 @@
+// -- src/lib/api.ts
+import { db } from './db';
+import type { Chat, FriendRequest, Message, User } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- API functions from previous steps (condensed for brevity) ---
+export const register = async (name: string, email: string, password: string): Promise<User> => { /* ... */ return {} as User };
+export const login = async (email: string, password: string): Promise<User> => { /* ... */ return {} as User };
+export const quickLogin = async (userId: string): Promise<User> => { /* ... */ return {} as User };
+export const logout = async (userId: string): Promise<void> => { /* ... */ };
+export const getUserById = async (userId: string): Promise<User | undefined> => { return db.users.get(userId); };
+export const getMessagesForChat = async (chatId: string, limit = 50, cursor?: number): Promise<{ messages: Message[], nextCursor: number | null }> => { /* ... */ return {messages:[], nextCursor: null} };
+export const sendMessage = async (chatId: string, senderId: string, content: string): Promise<Message> => { /* ... */ return {} as Message };
+export const markMessagesAsSeen = async (chatId: string, userId: string): Promise<void> => { /* ... */ };
+
+// --- FRIEND & GROUP API ---
+
+export const searchUsers = async (query: string, currentUserId: string): Promise<User[]> => {
+    await wait(400);
+    if (!query) return [];
+    return db.users
+        .where('name').startsWithIgnoreCase(query)
+        .filter(user => user.id !== currentUserId)
+        .limit(10)
+        .toArray();
+};
+
+export const sendFriendRequest = async (fromUserId: string, toUserId: string): Promise<FriendRequest> => {
+    await wait(500);
+    const existingRequest = await db.friendRequests
+        .where({ fromUserId, toUserId })
+        .or('fromUserId').equals(toUserId).and(fr => fr.toUserId === fromUserId)
+        .first();
+
+    if (existingRequest) throw new Error("Friend request already exists or you are already friends.");
+
+    const newRequest: FriendRequest = { id: uuidv4(), fromUserId, toUserId, status: 'pending', createdAt: new Date() };
+    await db.friendRequests.add(newRequest);
+    return newRequest;
+};
+
+export const getFriendRequests = async (toUserId: string): Promise<FriendRequest[]> => {
+    await wait(300);
+    return db.friendRequests.where({ toUserId, status: 'pending' }).toArray();
+};
+
+export const updateFriendRequestStatus = async (requestId: string, status: 'accepted' | 'rejected'): Promise<void> => {
+    await wait(600);
+    await db.transaction('rw', db.friendRequests, db.users, async () => {
+        const request = await db.friendRequests.get(requestId);
+        if (!request) throw new Error("Request not found.");
+
+        await db.friendRequests.update(requestId, { status });
+
+        if (status === 'accepted') {
+            const { fromUserId, toUserId } = request;
+            const fromUser = await db.users.get(fromUserId);
+            const toUser = await db.users.get(toUserId);
+
+            if (!fromUser || !toUser) throw new Error("User not found.");
+
+            await db.users.update(fromUserId, { friends: [...fromUser.friends, toUserId] });
+            await db.users.update(toUserId, { friends: [...toUser.friends, fromUserId] });
+        }
+    });
+};
+
+export const getFriends = async (userId: string): Promise<User[]> => {
+    await wait(300);
+    const user = await db.users.get(userId);
+    if (!user || !user.friends.length) return [];
+    return db.users.where('id').anyOf(user.friends).toArray();
+};
+
+export const removeFriend = async (userId: string, friendId: string): Promise<void> => {
+    await wait(600);
+    await db.transaction('rw', db.users, async () => {
+        const user = await db.users.get(userId);
+        const friend = await db.users.get(friendId);
+        if (!user || !friend) throw new Error("User not found.");
+
+        await db.users.update(userId, { friends: user.friends.filter(id => id !== friendId) });
+        await db.users.update(friendId, { friends: friend.friends.filter(id => id !== userId) });
+    });
+};
+
+export const createChat = async (participantIds: string[], currentUserId: string, groupName?: string): Promise<Chat> => {
+    await wait(800);
+    const allParticipantIds = [...new Set([currentUserId, ...participantIds])];
+
+    const isGroup = allParticipantIds.length > 2;
+
+    // For 1-on-1 chats, check if a chat already exists
+    if (!isGroup) {
+        const existingChat = await db.chats.filter(chat => 
+            !chat.isGroup &&
+            chat.participantIds.length === 2 &&
+            chat.participantIds.includes(allParticipantIds[0]) &&
+            chat.participantIds.includes(allParticipantIds[1])
+        ).first();
+        if (existingChat) return existingChat;
+    }
+    
+    const initialMessageContent = isGroup ? `${(await db.users.get(currentUserId))?.name} created the group "${groupName}".` : "Chat started.";
+    
+    const initialMessage: Message = {
+        id: uuidv4(),
+        chatId: '', // Will be set below
+        senderId: 'system',
+        content: initialMessageContent,
+        timestamp: new Date(),
+        isEvent: true
+    };
+    
+    const newChat: Chat = {
+        id: uuidv4(),
+        isGroup,
+        participantIds: allParticipantIds,
+        unreadCount: 0,
+        lastMessage: initialMessage
+    };
+    
+    if (isGroup) {
+        newChat.name = groupName || 'New Group';
+        newChat.creatorId = currentUserId;
+        newChat.avatar = `https://i.pravatar.cc/150?u=${newChat.id}`;
+    }
+
+    initialMessage.chatId = newChat.id;
+
+    await db.transaction('rw', db.chats, db.messages, async () => {
+        await db.chats.add(newChat);
+        await db.messages.add(initialMessage);
+    });
+
+    return newChat;
+};
+
+export const getChatById = async (chatId: string): Promise<Chat | undefined> => {
+    return db.chats.get(chatId);
+};
+
+export const addGroupMember = async (chatId: string, userId: string): Promise<void> => {
+    await wait(500);
+    await db.chats.where('id').equals(chatId).modify(chat => {
+        chat.participantIds.push(userId);
+    });
+};
+
+export const removeGroupMember = async (chatId: string, userId: string): Promise<void> => {
+    await wait(500);
+    const chat = await db.chats.get(chatId);
+    if (!chat) return;
+
+    // Simple removal. A real app might need to handle ownership transfer if the creator is removed.
+    await db.chats.update(chatId, { participantIds: chat.participantIds.filter(id => id !== userId) });
+};
+
+export const leaveGroup = async (chatId: string, userId: string): Promise<void> => {
+    // Re-use remove logic for simplicity
+    await removeGroupMember(chatId, userId);
+};
+
+export const updateGroupChat = async (chatId: string, updates: { name?: string; avatar?: string; }): Promise<void> => {
+    await wait(500);
+    await db.chats.update(chatId, updates);
+};
+
+export const getChatPartner = async (chat: Chat, currentUserId: string): Promise<User | undefined> => {
+    if (chat.isGroup) return undefined;
+    const partnerId = chat.participantIds.find(id => id !== currentUserId);
+    if (!partnerId) return undefined;
+    return await db.users.get(partnerId);
+};
+
+// -- src/store/friendStore.ts
+import create from 'zustand';
+import type { User, FriendRequest } from '../types';
+import * as api from '../lib/api';
+import { useAuthStore } from './authStore';
+
+interface FriendState {
+  myFriends: User[];
+  pendingRequests: (FriendRequest & { fromUser: User })[];
+  searchResults: User[];
+  isLoading: boolean;
+  fetchMyFriends: () => Promise<void>;
+  fetchPendingRequests: () => Promise<void>;
+  searchUsers: (query: string) => Promise<void>;
+  sendRequest: (toUserId: string) => Promise<void>;
+  acceptRequest: (requestId: string) => Promise<void>;
+  rejectRequest: (requestId: string) => Promise<void>;
+  removeFriend: (friendId: string) => Promise<void>;
+}
+
+const getCurrentUserId = () => useAuthStore.getState().currentUser?.id;
+
+export const useFriendStore = create<FriendState>((set, get) => ({
+  myFriends: [],
+  pendingRequests: [],
+  searchResults: [],
+  isLoading: false,
+
+  fetchMyFriends: async () => {
+    const userId = getCurrentUserId();
+    if (!userId) return;
+    set({ isLoading: true });
+    const friends = await api.getFriends(userId);
+    set({ myFriends: friends, isLoading: false });
+  },
+
+  fetchPendingRequests: async () => {
+    const userId = getCurrentUserId();
+    if (!userId) return;
+    set({ isLoading: true });
+    const requests = await api.getFriendRequests(userId);
+    const requestsWithUsers = await Promise.all(
+        requests.map(async req => ({
+            ...req,
+            fromUser: await api.getUserById(req.fromUserId) as User,
+        }))
+    );
+    set({ pendingRequests: requestsWithUsers.filter(r => r.fromUser), isLoading: false });
+  },
+  
+  searchUsers: async (query: string) => {
+    const userId = getCurrentUserId();
+    if (!userId) return;
+    set({ isLoading: true });
+    const results = await api.searchUsers(query, userId);
+    set({ searchResults: results, isLoading: false });
+  },
+
+  sendRequest: async (toUserId: string) => {
+    const fromUserId = getCurrentUserId();
+    if (!fromUserId) return;
+    await api.sendFriendRequest(fromUserId, toUserId);
+    // You might want to update some state here to show "request sent"
+  },
+  
+  acceptRequest: async (requestId: string) => {
+      await api.updateFriendRequestStatus(requestId, 'accepted');
+      get().fetchPendingRequests(); // Refresh lists
+      get().fetchMyFriends();
+  },
+
+  rejectRequest: async (requestId: string) => {
+      await api.updateFriendRequestStatus(requestId, 'rejected');
+      get().fetchPendingRequests(); // Refresh list
+  },
+
+  removeFriend: async (friendId: string) => {
+      const userId = getCurrentUserId();
+      if (!userId) return;
+      await api.removeFriend(userId, friendId);
+      get().fetchMyFriends(); // Refresh list
+  },
+}));
+
+// -- src/components/shared/FriendsManager.tsx
+import * as React from 'react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs';
+import { Input } from '../ui/Input';
+import { Button } from '../ui/Button';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { useFriendStore } from '@/store/friendStore';
+import { Check, UserPlus, X } from 'lucide-react';
+import { Spinner } from '../ui/Spinner';
+import { useDebounce } from '@/hooks/useDebounce';
+
+export const FriendsManager: React.FC = () => {
+    const { fetchMyFriends, fetchPendingRequests } = useFriendStore();
+
+    React.useEffect(() => {
+        fetchMyFriends();
+        fetchPendingRequests();
+    }, [fetchMyFriends, fetchPendingRequests]);
+
+    return (
+        <Tabs defaultValue="friends">
+            <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="friends">My Friends</TabsTrigger>
+                <TabsTrigger value="requests">Requests</TabsTrigger>
+                <TabsTrigger value="find">Find</TabsTrigger>
+            </TabsList>
+            <TabsContent value="friends"><MyFriendsTab /></TabsContent>
+            <TabsContent value="requests"><RequestsTab /></TabsContent>
+            <TabsContent value="find"><FindTab /></TabsContent>
+        </Tabs>
+    );
+};
+
+const MyFriendsTab: React.FC = () => {
+    const { myFriends, removeFriend, isLoading } = useFriendStore();
+    return (
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+            {isLoading && !myFriends.length && <Spinner />}
+            {!isLoading && !myFriends.length && <p className="text-sm text-center text-text-secondary p-4">You have no friends yet.</p>}
+            {myFriends.map(friend => (
+                <div key={friend.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary">
+                    <div className="flex items-center gap-3">
+                        <Avatar><AvatarImage src={friend.avatar} /><AvatarFallback>{friend.name[0]}</AvatarFallback></Avatar>
+                        <span>{friend.name}</span>
+                    </div>
+                    <Button variant="destructive" size="sm" onClick={() => removeFriend(friend.id)}>Remove</Button>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const RequestsTab: React.FC = () => {
+    const { pendingRequests, acceptRequest, rejectRequest, isLoading } = useFriendStore();
+    return (
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+            {isLoading && !pendingRequests.length && <Spinner />}
+            {!isLoading && !pendingRequests.length && <p className="text-sm text-center text-text-secondary p-4">No pending friend requests.</p>}
+            {pendingRequests.map(req => (
+                <div key={req.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary">
+                    <div className="flex items-center gap-3">
+                        <Avatar><AvatarImage src={req.fromUser.avatar} /><AvatarFallback>{req.fromUser.name[0]}</AvatarFallback></Avatar>
+                        <span>{req.fromUser.name}</span>
+                    </div>
+                    <div className="flex gap-2">
+                        <Button size="icon" className="bg-status-success hover:bg-status-success/90" onClick={() => acceptRequest(req.id)}><Check className="h-4 w-4" /></Button>
+                        <Button size="icon" variant="destructive" onClick={() => rejectRequest(req.id)}><X className="h-4 w-4" /></Button>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const FindTab: React.FC = () => {
+    const [query, setQuery] = React.useState('');
+    const debouncedQuery = useDebounce(query, 300);
+    const { searchResults, searchUsers, sendRequest, isLoading } = useFriendStore();
+
+    React.useEffect(() => {
+        searchUsers(debouncedQuery);
+    }, [debouncedQuery, searchUsers]);
+
+    return (
+        <div className="space-y-4">
+            <Input placeholder="Search by name..." value={query} onChange={(e) => setQuery(e.target.value)} />
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+                {isLoading && <Spinner/>}
+                {!isLoading && !searchResults.length && query && <p className="text-sm text-center text-text-secondary p-4">No users found.</p>}
+                {searchResults.map(user => (
+                    <div key={user.id} className="flex items-center justify-between p-2 rounded-md hover:bg-background-secondary">
+                        <div className="flex items-center gap-3">
+                            <Avatar><AvatarImage src={user.avatar} /><AvatarFallback>{user.name[0]}</AvatarFallback></Avatar>
+                            <span>{user.name}</span>
+                        </div>
+                        <Button size="sm" onClick={() => sendRequest(user.id)}><UserPlus className="h-4 w-4 mr-2" />Add</Button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// -- src/hooks/useDebounce.ts
+import { useState, useEffect } from 'react';
+
+export function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
+// -- src/components/shared/SettingsDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/Dialog';
+import { FriendsManager } from './FriendsManager';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/Tabs';
+import { ThemeSwitcher } from './ThemeSwitcher';
+
+interface SettingsDialogProps {
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onOpenChange }) => {
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Settings</DialogTitle>
+                </DialogHeader>
+                <Tabs defaultValue="friends" className="w-full">
+                    <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="friends">Friends</TabsTrigger>
+                        <TabsTrigger value="theme">Theme</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="friends">
+                        <FriendsManager />
+                    </TabsContent>
+                    <TabsContent value="theme">
+                        <ThemeSwitcher />
+                    </TabsContent>
+                </Tabs>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/shared/ThemeSwitcher.tsx
+// Placeholder component for now
+import * as React from 'react';
+import { ThemeToggle } from '../ui/ThemeToggle';
+export const ThemeSwitcher: React.FC = () => (
+    <div className="p-4 flex flex-col items-center gap-4">
+        <p>Theme customization options will be here.</p>
+        <ThemeToggle/>
+    </div>
+);
+
+// -- src/components/chat/CreateChatDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogClose } from '@/components/ui/Dialog';
+import { Button } from '../ui/Button';
+import { useFriendStore } from '@/store/friendStore';
+import { useAuth } from '@/hooks/useAuth';
+import * as api from '@/lib/api';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Input } from '../ui/Input';
+import { useChatStore } from '@/store/chatStore';
+
+interface CreateChatDialogProps {
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const CreateChatDialog: React.FC<CreateChatDialogProps> = ({ isOpen, onOpenChange }) => {
+    const { myFriends, fetchMyFriends } = useFriendStore();
+    const { currentUser } = useAuth();
+    const setActiveChatId = useChatStore(state => state.setActiveChatId);
+
+    const [selectedFriends, setSelectedFriends] = React.useState<string[]>([]);
+    const [step, setStep] = React.useState(1);
+    const [groupName, setGroupName] = React.useState('');
+    const [isLoading, setIsLoading] = React.useState(false);
+
+    React.useEffect(() => {
+        if (isOpen) {
+            fetchMyFriends();
+        } else {
+            // Reset state on close
+            setSelectedFriends([]);
+            setStep(1);
+            setGroupName('');
+        }
+    }, [isOpen, fetchMyFriends]);
+
+    const handleToggleFriend = (friendId: string) => {
+        setSelectedFriends(prev =>
+            prev.includes(friendId) ? prev.filter(id => id !== friendId) : [...prev, friendId]
+        );
+    };
+
+    const handleNext = () => {
+        if (selectedFriends.length > 1) {
+            setStep(2);
+        } else {
+            handleCreateChat();
+        }
+    };
+    
+    const handleCreateChat = async () => {
+        if (!currentUser || selectedFriends.length === 0) return;
+        setIsLoading(true);
+        try {
+            const newChat = await api.createChat(selectedFriends, currentUser.id, groupName);
+            setActiveChatId(newChat.id);
+            onOpenChange(false);
+        } catch (error) {
+            console.error("Failed to create chat", error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>{step === 1 ? 'Start a new chat' : 'Name your group'}</DialogTitle>
+                </DialogHeader>
+                {step === 1 ? (
+                    <div className="space-y-2 max-h-80 overflow-y-auto">
+                        {myFriends.map(friend => (
+                            <div key={friend.id} onClick={() => handleToggleFriend(friend.id)}
+                                className={`flex items-center gap-3 p-2 rounded-md cursor-pointer ${selectedFriends.includes(friend.id) ? 'bg-primary-accent/20' : 'hover:bg-background-secondary'}`}>
+                                <Avatar><AvatarImage src={friend.avatar} /><AvatarFallback>{friend.name[0]}</AvatarFallback></Avatar>
+                                <span>{friend.name}</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <Input placeholder="Group name..." value={groupName} onChange={(e) => setGroupName(e.target.value)} />
+                )}
+                <DialogFooter>
+                    <DialogClose asChild><Button variant="ghost">Cancel</Button></DialogClose>
+                    <Button onClick={step === 1 ? handleNext : handleCreateChat} disabled={isLoading || selectedFriends.length === 0}>
+                        {isLoading ? <Spinner size="sm"/> : (step === 1 && selectedFriends.length > 1 ? 'Next' : 'Create Chat')}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/chat/GroupSettingsDialog.tsx
+// This is a placeholder for now, as it's a very complex component.
+// It will be fully implemented in a later step if needed.
+import * as React from 'react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/Dialog';
+
+interface GroupSettingsDialogProps {
+    chatId: string;
+    isOpen: boolean;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const GroupSettingsDialog: React.FC<GroupSettingsDialogProps> = ({ chatId, isOpen, onOpenChange }) => {
+    return (
+        <Dialog open={isOpen} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Group Settings for {chatId}</DialogTitle>
+                </DialogHeader>
+                <p>Full group management UI will be here.</p>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/components/layout/MainLayout.tsx
+import * as React from 'react';
+import { Sidebar } from '../chat/Sidebar';
+import { useChatStore } from '@/store/chatStore';
+import { MessageSquare } from 'lucide-react';
+import { ChatView } from '../chat/ChatView';
+import { SettingsDialog } from '../shared/SettingsDialog';
+import { CreateChatDialog } from '../chat/CreateChatDialog';
+
+export const MainLayout: React.FC = () => {
+    const activeChatId = useChatStore((state) => state.activeChatId);
+    const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+    const [isCreateChatOpen, setIsCreateChatOpen] = React.useState(false);
+
+    return (
+        <>
+            <div className="flex h-screen w-full bg-background-primary text-text-primary">
+                <Sidebar 
+                    onNewChat={() => setIsCreateChatOpen(true)}
+                    onSettings={() => setIsSettingsOpen(true)}
+                />
+                <main className="flex-1 h-full">
+                    {activeChatId ? (
+                        <ChatView key={activeChatId} />
+                    ) : (
+                        <div className="flex h-full flex-col items-center justify-center text-text-secondary">
+                            <MessageSquare size={48} className="mb-4" />
+                            <h2 className="text-2xl font-semibold">Welcome to QuikChat</h2>
+                            <p>Select a conversation to start messaging.</p>
+                        </div>
+                    )}
+                </main>
+            </div>
+            <SettingsDialog isOpen={isSettingsOpen} onOpenChange={setIsSettingsOpen} />
+            <CreateChatDialog isOpen={isCreateChatOpen} onOpenChange={setIsCreateChatOpen} />
+        </>
+    );
+};
+
+
+// -- src/components/chat/Sidebar.tsx
+import * as React from 'react';
+import { Globe, LogOut, Plus, Settings, User as UserIcon } from 'lucide-react';
+// ... other imports from previous steps
+import { Button } from '../ui/Button';
+import { Tooltip, TooltipProvider, TooltipTrigger, TooltipContent } from '../ui/Tooltip';
+// ... other imports
+
+interface SidebarProps {
+    onNewChat: () => void;
+    onSettings: () => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ onNewChat, onSettings }) => {
+  return (
+    <aside className="w-80 h-full flex flex-col border-r border-border bg-background-secondary">
+      <UserMenu onNewChat={onNewChat} onSettings={onSettings} />
+      <ChatList />
+    </aside>
+  );
+};
+
+const UserMenu: React.FC<SidebarProps> = ({ onNewChat, onSettings }) => {
+  const { currentUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  return (
+    <div className="p-2 flex justify-between items-center border-b border-border">
+      {/* ... Popover for user profile ... */}
+      <TooltipProvider delayDuration={100}>
+        <div className="flex items-center">
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon"><Globe className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>Open World</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={onNewChat}><Plus className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>New Chat</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={onSettings}><Settings className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>Settings</p></TooltipContent>
+            </Tooltip>
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+};
+// ... Other components (ChatList, ChatItem, etc.) remain largely the same.
+
+// -- src/components/chat/ChatView.tsx
+// Add state for group settings dialog
+import * as React from 'react';
+// ... other imports
+import { GroupSettingsDialog } from './GroupSettingsDialog';
+
+export const ChatView: React.FC = () => {
+    const { activeChatId, /* ... */ } = useChatStore();
+    const [chatInfo, setChatInfo] = React.useState</* ... */ | null>(null);
+    const [isGroupSettingsOpen, setIsGroupSettingsOpen] = React.useState(false);
+    
+    // ... useEffect to fetch chatInfo ...
+
+    return (
+        <div className="flex flex-col h-screen">
+            <ChatHeader 
+                info={chatInfo} 
+                isGroup={chatInfo?.isGroup} 
+                onHeaderClick={() => chatInfo?.isGroup && setIsGroupSettingsOpen(true)}
+            />
+            <MessageList />
+            <MessageInput />
+            {activeChatId && chatInfo?.isGroup && (
+                <GroupSettingsDialog 
+                    chatId={activeChatId} 
+                    isOpen={isGroupSettingsOpen} 
+                    onOpenChange={setIsGroupSettingsOpen} 
+                />
+            )}
+        </div>
+    );
+};
+
+// Update ChatHeader to be clickable
+const ChatHeader: React.FC<{ 
+    info: { name: string; avatar?: string; status: string; isGroup?: boolean } | null;
+    isGroup?: boolean;
+    onHeaderClick: () => void;
+}> = ({ info, isGroup, onHeaderClick }) => {
+    const headerContent = (
+        <div className="flex items-center">
+            <Avatar>
+                <AvatarImage src={info?.avatar} alt={info?.name} />
+                <AvatarFallback>{info?.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="ml-3">
+                <p className="font-semibold">{info?.name}</p>
+                <p className="text-xs text-text-secondary">{info?.status}</p>
+            </div>
+        </div>
+    );
+    
+    return (
+        <div className="p-4 border-b border-border">
+            {isGroup ? (
+                <button onClick={onHeaderClick} className="w-full text-left rounded-md hover:bg-background-secondary p-2 -m-2">
+                    {headerContent}
+                </button>
+            ) : (
+                headerContent
+            )}
+        </div>
+    );
+};

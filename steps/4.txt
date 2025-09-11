@@ -1,0 +1,534 @@
+// -- src/lib/api.ts
+import { db } from './db';
+import type { Chat, Message, User } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- AUTH API (from previous steps, unchanged) ---
+export const register = async (name: string, email: string, password: string): Promise<User> => { /* ... */ return {} as User };
+export const login = async (email: string, password: string): Promise<User> => { /* ... */ return {} as User };
+export const quickLogin = async (userId: string): Promise<User> => { /* ... */ return {} as User };
+export const logout = async (userId: string): Promise<void> => { /* ... */ };
+export const getUserById = async (userId: string): Promise<User | undefined> => { return db.users.get(userId); };
+// --- END AUTH API ---
+
+
+// --- CHAT API (Updated) ---
+
+export const getChatsForUser = async (userId: string): Promise<Chat[]> => { /* ... */ return [] };
+export const getChatPartner = async (chat: Chat, currentUserId: string): Promise<User | undefined> => { /* ... */ return undefined };
+
+/**
+ * Fetches messages for a specific chat with cursor-based pagination.
+ * @param chatId - The ID of the chat.
+ * @param limit - The number of messages to fetch.
+ * @param cursor - The timestamp of the last message from the previous fetch (for pagination).
+ * @returns An object containing the fetched messages and the next cursor.
+ */
+export const getMessagesForChat = async (chatId: string, limit = 50, cursor?: number): Promise<{ messages: Message[], nextCursor: number | null }> => {
+    await wait(500); // Simulate network delay
+
+    let collection = db.messages
+        .where('chatId').equals(chatId)
+        .reverse(); // Newest first
+
+    if (cursor) {
+        collection = collection.and(msg => msg.timestamp.getTime() < cursor);
+    }
+
+    const messages = await collection.limit(limit).toArray();
+    
+    const nextCursor = messages.length === limit
+        ? messages[messages.length - 1].timestamp.getTime()
+        : null;
+
+    return { messages: messages.reverse(), nextCursor }; // Oldest first for display
+};
+
+/**
+ * Sends a new message to a chat.
+ * @param chatId - The ID of the chat.
+ * @param senderId - The ID of the user sending the message.
+ * @param content - The text content of the message.
+ * @returns The newly created message object.
+ */
+export const sendMessage = async (chatId: string, senderId: string, content: string): Promise<Message> => {
+    await wait(300); // Simulate sending delay
+    
+    const newMessage: Message = {
+        id: uuidv4(),
+        chatId,
+        senderId,
+        content,
+        timestamp: new Date(),
+        isEvent: false,
+        status: 'sent', // Initial status
+    };
+
+    await db.transaction('rw', db.messages, db.chats, async () => {
+        await db.messages.add(newMessage);
+        await db.chats.update(chatId, { lastMessage: newMessage });
+    });
+
+    return newMessage;
+};
+
+/**
+ * Marks all messages in a chat as "seen" for a specific user.
+ * @param chatId - The ID of the chat.
+ * @param userId - The ID of the user who has seen the messages.
+ */
+export const markMessagesAsSeen = async (chatId: string, userId: string): Promise<void> => {
+    await wait(100);
+    
+    // In a real backend, this would be more complex.
+    // Here we'll just update the chat's unread count.
+    await db.chats.update(chatId, { unreadCount: 0 });
+
+    // We can also update the status of messages sent by OTHERS to "seen" by the current user
+    // But for the scope of this step, updating unreadCount is sufficient.
+};
+
+// -- src/store/chatStore.ts
+import create from 'zustand';
+import type { Chat, Message } from '../types';
+import * as api from '../lib/api';
+
+interface ChatState {
+  // Sidebar state
+  chats: Chat[];
+  activeChatId: string | null;
+
+  // ChatView state
+  messages: Message[];
+  messagesLoading: boolean;
+  hasMoreMessages: boolean;
+  
+  setActiveChatId: (chatId: string | null) => Promise<void>;
+  fetchMessages: (chatId: string) => Promise<void>;
+  loadMoreMessages: () => Promise<void>;
+  sendMessage: (content: string) => Promise<void>;
+}
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  // Sidebar state
+  chats: [],
+  activeChatId: null,
+
+  // ChatView state
+  messages: [],
+  messagesLoading: false,
+  hasMoreMessages: true,
+
+  /**
+   * Sets the active chat, clears previous messages, and fetches new ones.
+   */
+  setActiveChatId: async (chatId: string | null) => {
+    if (get().activeChatId === chatId) return;
+    
+    set({ activeChatId: chatId, messages: [], hasMoreMessages: true });
+    if (chatId) {
+      await get().fetchMessages(chatId);
+      // Mark messages as seen when the chat is opened
+      await api.markMessagesAsSeen(chatId, ''); // userId not needed for local sim
+    }
+  },
+
+  /**
+   * Fetches the initial batch of messages for a chat.
+   */
+  fetchMessages: async (chatId: string) => {
+    set({ messagesLoading: true });
+    try {
+      const { messages, nextCursor } = await api.getMessagesForChat(chatId);
+      set({
+        messages,
+        hasMoreMessages: !!nextCursor,
+        messagesLoading: false,
+      });
+    } catch (error) {
+      console.error("Failed to fetch messages:", error);
+      set({ messagesLoading: false });
+    }
+  },
+
+  /**
+   * Loads an older batch of messages for the active chat for pagination.
+   */
+  loadMoreMessages: async () => {
+    const { activeChatId, messages, hasMoreMessages } = get();
+    if (!activeChatId || !hasMoreMessages) return;
+
+    set({ messagesLoading: true });
+    try {
+      const oldestMessage = messages[0];
+      const cursor = oldestMessage?.timestamp.getTime();
+      const { messages: newMessages, nextCursor } = await api.getMessagesForChat(activeChatId, 50, cursor);
+      
+      set(state => ({
+        messages: [...newMessages, ...state.messages],
+        hasMoreMessages: !!nextCursor,
+        messagesLoading: false,
+      }));
+    } catch (error)      {
+      console.error("Failed to load more messages:", error);
+      set({ messagesLoading: false });
+    }
+  },
+
+  /**
+   * Sends a message from the current user to the active chat.
+   */
+  sendMessage: async (content: string) => {
+    const { activeChatId } = get();
+    // This is a placeholder for getting the current user ID
+    const senderId = sessionStorage.getItem('userId'); 
+
+    if (!activeChatId || !senderId || !content.trim()) return;
+
+    try {
+      const newMessage = await api.sendMessage(activeChatId, senderId, content);
+      set(state => ({ messages: [...state.messages, newMessage] }));
+    } catch (error) {
+      console.error("Failed to send message:", error);
+      // Here you might want to add UI feedback for a failed message
+    }
+  },
+}));
+
+// -- src/components/layout/MainLayout.tsx
+import * as React from 'react';
+import { Sidebar } from '../chat/Sidebar';
+import { useChatStore } from '@/store/chatStore';
+import { MessageSquare } from 'lucide-react';
+import { ChatView } from '../chat/ChatView';
+
+export const MainLayout: React.FC = () => {
+    const activeChatId = useChatStore((state) => state.activeChatId);
+
+    return (
+        <div className="flex h-screen w-full bg-background-primary text-text-primary">
+            <Sidebar />
+            <main className="flex-1 h-full">
+                {activeChatId ? (
+                    <ChatView key={activeChatId} /> // Use key to force re-mount on chat change
+                ) : (
+                    <div className="flex h-full flex-col items-center justify-center text-text-secondary">
+                        <MessageSquare size={48} className="mb-4" />
+                        <h2 className="text-2xl font-semibold">Welcome to QuikChat</h2>
+                        <p>Select a conversation to start messaging.</p>
+                    </div>
+                )}
+            </main>
+        </div>
+    );
+};
+
+// -- src/components/chat/MessageInput.tsx
+import * as React from 'react';
+import { Smile, Send } from 'lucide-react';
+import TextareaAutosize from 'react-textarea-autosize';
+import { Button } from '../ui/Button';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { useChatStore } from '@/store/chatStore';
+
+/**
+ * Renders the message input component with an emoji picker and send button.
+ */
+export const MessageInput: React.FC = () => {
+    const [message, setMessage] = React.useState('');
+    const sendMessage = useChatStore((state) => state.sendMessage);
+
+    const handleSend = () => {
+        if (message.trim()) {
+            sendMessage(message);
+            setMessage('');
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    };
+
+    const addEmoji = (emoji: string) => {
+        setMessage(prev => prev + emoji);
+    };
+
+    return (
+        <div className="p-4 bg-background-secondary border-t border-border flex items-start gap-4">
+            <div className="flex-1 flex items-center bg-background-primary rounded-lg border border-border p-2">
+                <Popover>
+                    <PopoverTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                            <Smile className="h-5 w-5 text-text-secondary" />
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-2">
+                        <div className="grid grid-cols-6 gap-1">
+                            {['😀', '😂', '😍', '🤔', '👍', '❤️', '🙏', '🎉'].map(emoji => (
+                                <button key={emoji} onClick={() => addEmoji(emoji)} className="text-2xl rounded-md hover:bg-background-secondary p-1">{emoji}</button>
+                            ))}
+                        </div>
+                    </PopoverContent>
+                </Popover>
+
+                <TextareaAutosize
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Type a message..."
+                    maxRows={5}
+                    className="flex-1 bg-transparent resize-none focus:outline-none text-sm mx-2"
+                />
+            </div>
+            <Button onClick={handleSend} size="icon" disabled={!message.trim()}>
+                <Send className="h-5 w-5" />
+            </Button>
+        </div>
+    );
+};
+
+// -- src/components/chat/Message.tsx
+import * as React from 'react';
+import { Check, CheckCheck } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { Message as MessageType, MessageStatus, User } from '@/types';
+import { useAuth } from '@/hooks/useAuth';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { db } from '@/lib/db';
+
+interface MessageProps {
+    message: MessageType;
+    showAvatar: boolean;
+}
+
+/**
+ * Renders a single chat message bubble with appropriate styling for sender, status, and content.
+ */
+export const Message: React.FC<MessageProps> = ({ message, showAvatar }) => {
+    const { currentUser } = useAuth();
+    const [sender, setSender] = React.useState<User | null>(null);
+
+    const isCurrentUser = message.senderId === currentUser?.id;
+    const isEvent = message.isEvent;
+
+    React.useEffect(() => {
+        if (!isCurrentUser && !isEvent && message.senderId) {
+            db.users.get(message.senderId).then(user => setSender(user || null));
+        }
+    }, [message.senderId, isCurrentUser, isEvent]);
+
+    if (isEvent) {
+        return (
+            <div className="text-center text-xs text-text-secondary my-2">
+                {message.content}
+            </div>
+        );
+    }
+
+    const messageDate = message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const tooltipDate = message.timestamp.toLocaleString();
+
+    return (
+        <div className={cn("flex items-end gap-2 my-1", isCurrentUser ? "justify-end" : "justify-start")}>
+            {!isCurrentUser && (
+                <div className="w-8">
+                    {showAvatar && sender && (
+                        <Avatar className="h-8 w-8">
+                            <AvatarImage src={sender.avatar} alt={sender.name} />
+                            <AvatarFallback>{sender.name.charAt(0)}</AvatarFallback>
+                        </Avatar>
+                    )}
+                </div>
+            )}
+            <TooltipProvider>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <div className={cn(
+                            "max-w-xs md:max-w-md p-2 px-3 rounded-lg flex flex-col",
+                            isCurrentUser ? "bg-primary-accent text-white rounded-br-none" : "bg-background-secondary text-text-primary rounded-bl-none"
+                        )}>
+                            {!isCurrentUser && showAvatar && sender && (
+                                <p className="text-xs font-semibold text-secondary-accent mb-1">{sender.name}</p>
+                            )}
+                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                            <div className="flex items-center justify-end gap-1 self-end mt-1">
+                                <span className="text-xs opacity-70">{messageDate}</span>
+                                {isCurrentUser && <MessageStatusIcon status={message.status} />}
+                            </div>
+                        </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                        <p>{tooltipDate}</p>
+                    </TooltipContent>
+                </Tooltip>
+            </TooltipProvider>
+        </div>
+    );
+};
+
+const MessageStatusIcon: React.FC<{ status?: MessageStatus }> = ({ status }) => {
+    if (status === 'sent') return <Check className="h-4 w-4" />;
+    if (status === 'delivered') return <CheckCheck className="h-4 w-4" />;
+    if (status === 'seen') return <CheckCheck className="h-4 w-4 text-blue-400" />;
+    return null;
+};
+
+// -- src/components/chat/ChatView.tsx
+import * as React from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useChatStore } from '@/store/chatStore';
+import { useAuth } from '@/hooks/useAuth';
+import type { Chat, User, Message as MessageType } from '@/types';
+import { db } from '@/lib/db';
+import { getChatPartner } from '@/lib/api';
+import { Message } from './Message';
+import { MessageInput } from './MessageInput';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Skeleton } from '../ui/Skeleton';
+import { Spinner } from '../ui/Spinner';
+import { Button } from '../ui/Button';
+
+/**
+ * The main view for a single chat conversation, including header, virtualized message list, and input.
+ */
+export const ChatView: React.FC = () => {
+    const { activeChatId, messages, messagesLoading, hasMoreMessages, loadMoreMessages } = useChatStore();
+    const { currentUser } = useAuth();
+    const [chatInfo, setChatInfo] = React.useState<{ name: string; avatar?: string; status: string } | null>(null);
+
+    React.useEffect(() => {
+        const fetchChatInfo = async () => {
+            if (!activeChatId || !currentUser) return;
+            const chat = await db.chats.get(activeChatId);
+            if (!chat) return;
+
+            if (chat.isGroup) {
+                setChatInfo({
+                    name: chat.name || 'Group Chat',
+                    avatar: chat.avatar,
+                    status: `${chat.participantIds.length} members`,
+                });
+            } else {
+                const partner = await getChatPartner(chat, currentUser.id);
+                setChatInfo({
+                    name: partner?.name || 'Unknown User',
+                    avatar: partner?.avatar,
+                    status: partner?.isOnline ? 'Online' : 'Offline',
+                });
+            }
+        };
+        fetchChatInfo();
+    }, [activeChatId, currentUser]);
+
+    return (
+        <div className="flex flex-col h-screen">
+            <ChatHeader info={chatInfo} />
+            <MessageList />
+            <MessageInput />
+        </div>
+    );
+};
+
+const ChatHeader: React.FC<{ info: { name: string; avatar?: string; status: string } | null }> = ({ info }) => {
+    if (!info) {
+        return (
+            <div className="p-4 border-b border-border flex items-center">
+                <Skeleton className="h-10 w-10 rounded-full" />
+                <div className="ml-3 space-y-1">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="p-4 border-b border-border flex items-center">
+            <Avatar>
+                <AvatarImage src={info.avatar} alt={info.name} />
+                <AvatarFallback>{info.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="ml-3">
+                <p className="font-semibold">{info.name}</p>
+                <p className="text-xs text-text-secondary">{info.status}</p>
+            </div>
+        </div>
+    );
+};
+
+const MessageList: React.FC = () => {
+    const { messages, messagesLoading, hasMoreMessages, loadMoreMessages } = useChatStore();
+    const parentRef = React.useRef<HTMLDivElement>(null);
+    const count = messages.length;
+
+    const rowVirtualizer = useVirtualizer({
+        count,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => 70, // Estimate row height
+        overscan: 5,
+    });
+
+    React.useEffect(() => {
+        // Scroll to bottom when new messages are added
+        if (rowVirtualizer && count > 0) {
+            rowVirtualizer.scrollToIndex(count - 1, { align: 'end', smoothScroll: true });
+        }
+    }, [count, rowVirtualizer]);
+
+    const handleLoadMore = React.useCallback(() => {
+        if (rowVirtualizer.getVirtualItems()[0]?.index === 0 && hasMoreMessages && !messagesLoading) {
+            loadMoreMessages();
+        }
+    }, [rowVirtualizer, hasMoreMessages, messagesLoading, loadMoreMessages]);
+    
+    React.useEffect(() => {
+        handleLoadMore();
+    }, [handleLoadMore]);
+
+    return (
+        <div ref={parentRef} className="flex-1 overflow-y-auto p-4">
+            {messagesLoading && messages.length === 0 && <div className="flex justify-center items-center h-full"><Spinner /></div>}
+            
+            <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+                {hasMoreMessages && (
+                    <div className="flex justify-center py-2">
+                        <Button variant="outline" size="sm" onClick={loadMoreMessages} disabled={messagesLoading}>
+                            {messagesLoading ? 'Loading...' : 'Load More'}
+                        </Button>
+                    </div>
+                )}
+
+                {rowVirtualizer.getVirtualItems().map(virtualItem => {
+                    const message = messages[virtualItem.index];
+                    const prevMessage = messages[virtualItem.index - 1];
+                    const showAvatar = !prevMessage || prevMessage.senderId !== message.senderId;
+
+                    return (
+                        <div
+                            key={virtualItem.key}
+                            style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                width: '100%',
+                                height: `${virtualItem.size}px`,
+                                transform: `translateY(${virtualItem.start}px)`,
+                            }}
+                        >
+                            <Message message={message} showAvatar={showAvatar} />
+                        </div>
+                    );
+                })}
+            </div>
+             {!messagesLoading && messages.length === 0 && (
+                <div className="text-center text-text-secondary">No messages yet. Say hello!</div>
+            )}
+        </div>
+    );
+};

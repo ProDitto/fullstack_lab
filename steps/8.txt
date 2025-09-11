@@ -1,0 +1,425 @@
+// -- src/lib/api.ts
+// ... (existing API functions)
+
+// --- OPEN WORLD API (UPDATED) ---
+
+export const getOpenWorlds = async (): Promise<OpenWorld[]> => { /* ... */ return []; };
+export const joinWorld = async (worldId: string, password?: string): Promise<OpenWorld> => { /* ... */ return {} as OpenWorld; };
+
+/**
+ * Sends a message to an open world chat.
+ * For simplicity, we'll reuse the Message model and add it to the DB.
+ * The chatId will be the worldId.
+ */
+export const sendWorldMessage = async (worldId: string, senderId: string, content: string): Promise<Message> => {
+    await wait(200);
+    const newMessage: Message = {
+        id: uuidv4(),
+        chatId: worldId, // Using worldId as chatId
+        senderId,
+        content,
+        timestamp: new Date(),
+        isEvent: false,
+    };
+    await db.messages.add(newMessage);
+    return newMessage;
+};
+
+// --- THEME API ---
+
+/**
+ * Fetches all saved custom themes from the database.
+ */
+export const getThemes = async (): Promise<ThemeConfig[]> => {
+    await wait(300);
+    return db.themes.toArray();
+};
+
+/**
+ * Saves a new custom theme to the database.
+ */
+export const saveTheme = async (theme: Omit<ThemeConfig, 'id'>): Promise<ThemeConfig> => {
+    await wait(500);
+    const newTheme = { ...theme, id: uuidv4() };
+    await db.themes.add(newTheme);
+    return newTheme;
+};
+
+// -- src/lib/simulation.ts
+// ... (existing chat simulation)
+
+const WORLD_MOCK_MESSAGES = [
+    "Hello everyone!", "Nice place.", "Anyone seen the hidden waterfall?", "Lagging a bit.", "This is cool!",
+];
+
+export const startWorldSimulation = (
+    worldId: string,
+    addPlayer: (player: any) => void,
+    updatePlayerPosition: (playerId: string, position: { x: number, y: number }) => void,
+    addWorldMessage: (message: Message) => void // New callback
+) => {
+    // ... (existing player movement simulation logic)
+
+    worldSimulationInterval = setInterval(async () => {
+        // ... (player movement logic)
+        
+        // Simulate a new incoming world message
+        if (Math.random() < 0.1) { // 10% chance
+            const mockUsers = await db.users.limit(5).toArray();
+            const randomUser = mockUsers[Math.floor(Math.random() * mockUsers.length)];
+            
+            const newMessage: Message = {
+                id: uuidv4(),
+                chatId: worldId,
+                senderId: randomUser.id,
+                content: WORLD_MOCK_MESSAGES[Math.floor(Math.random() * WORLD_MOCK_MESSAGES.length)],
+                timestamp: new Date(),
+                isEvent: false,
+            };
+
+            await db.messages.add(newMessage);
+            addWorldMessage(newMessage);
+        }
+    }, 2000); // Check every 2 seconds for messages
+};
+
+// ... (stopWorldSimulation)
+
+// -- src/store/worldStore.ts
+// ... (existing world store)
+import type { Message } from '../types';
+
+interface WorldState {
+    // ...
+    worldChatMessages: Message[];
+    sendWorldMessage: (content: string) => Promise<void>;
+    addWorldMessage: (message: Message) => void;
+}
+
+export const useWorldStore = create<WorldState>((set, get) => ({
+    // ... (existing state)
+    worldChatMessages: [],
+
+    joinWorld: async (worldId, password) => {
+        // ... (existing logic)
+        // Reset chat messages on join
+        set({ worldChatMessages: [] });
+        return true; // or false
+    },
+    
+    sendWorldMessage: async (content) => {
+        const { currentWorld } = get();
+        const currentUser = useAuthStore.getState().currentUser;
+        if (!currentWorld || !currentUser || !content.trim()) return;
+
+        const newMessage = await api.sendWorldMessage(currentWorld.id, currentUser.id, content);
+        get().addWorldMessage(newMessage);
+    },
+
+    addWorldMessage: (message) => {
+        set(state => ({
+            worldChatMessages: [...state.worldChatMessages, message].sort((a,b) => a.timestamp.getTime() - b.timestamp.getTime())
+        }));
+    },
+    // ... (rest of the store)
+}));
+
+// -- src/store/themeStore.ts
+import create from 'zustand';
+import type { ThemeConfig } from '../types';
+import * as api from '../lib/api';
+
+interface ThemeState {
+    currentThemeId: string;
+    customThemes: ThemeConfig[];
+    fetchCustomThemes: () => Promise<void>;
+    setTheme: (themeId: string) => void;
+    addCustomTheme: (theme: Omit<ThemeConfig, 'id'>) => Promise<void>;
+}
+
+const applyTheme = (theme: ThemeConfig) => {
+    const root = document.documentElement;
+    Object.entries(theme.colors).forEach(([category, values]) => {
+        Object.entries(values).forEach(([key, value]) => {
+            const varName = `--color-${category}-${key}`;
+            if (typeof value === 'string') {
+                 root.style.setProperty(varName, hexToRgb(value));
+            }
+        });
+    });
+    root.className = `theme-custom-${theme.id}`;
+};
+
+const hexToRgb = (hex: string) => {
+  let c: any = hex.substring(1).split('');
+  if (c.length === 3) { c = [c[0], c[0], c[1], c[1], c[2], c[2]]; }
+  c = '0x' + c.join('');
+  return [(c >> 16) & 255, (c >> 8) & 255, c & 255].join(' ');
+};
+
+const resetTheme = () => {
+    const root = document.documentElement;
+    // You'd need a comprehensive list of all your variables to truly reset them.
+    // A simpler way is to just remove the style attribute.
+    root.style.cssText = '';
+};
+
+export const useThemeStore = create<ThemeState>((set, get) => ({
+    currentThemeId: localStorage.getItem('themeId') || 'light',
+    customThemes: [],
+
+    fetchCustomThemes: async () => {
+        const themes = await api.getThemes();
+        set({ customThemes: themes });
+        
+        // Re-apply theme if it was a custom one
+        const { currentThemeId } = get();
+        const customTheme = themes.find(t => t.id === currentThemeId);
+        if (customTheme) {
+            applyTheme(customTheme);
+        }
+    },
+
+    setTheme: (themeId: string) => {
+        localStorage.setItem('themeId', themeId);
+        const root = document.documentElement;
+        
+        resetTheme(); // Clear custom styles
+        root.classList.remove('light', 'dark'); // Assuming you have these base themes
+        
+        if (themeId === 'light' || themeId === 'dark') {
+            root.classList.add(themeId);
+        } else {
+            const customTheme = get().customThemes.find(t => t.id === themeId);
+            if (customTheme) {
+                applyTheme(customTheme);
+            }
+        }
+        set({ currentThemeId: themeId });
+    },
+
+    addCustomTheme: async (themeData) => {
+        const newTheme = await api.saveTheme(themeData);
+        set(state => ({ customThemes: [...state.customThemes, newTheme] }));
+        get().setTheme(newTheme.id);
+    },
+}));
+
+// -- src/hooks/useTheme.ts
+import { useEffect } from 'react';
+import { useThemeStore } from '../store/themeStore';
+
+export const useTheme = () => {
+  const { currentThemeId, setTheme, fetchCustomThemes } = useThemeStore();
+
+  useEffect(() => {
+    // Apply initial theme and fetch custom themes on mount
+    fetchCustomThemes().then(() => {
+        setTheme(currentThemeId);
+    });
+  }, [currentThemeId, setTheme, fetchCustomThemes]);
+
+  return { currentThemeId, setTheme };
+};
+
+// -- src/App.tsx
+// ... (imports)
+import { useTheme } from './hooks/useTheme';
+
+const App: React.FC = () => {
+  // ...
+  // Initialize theme hook to apply theme on load
+  useTheme();
+  
+  // ... (rest of App component)
+};
+
+// -- src/components/shared/ThemeSwitcher.tsx
+import * as React from 'react';
+import { useThemeStore } from '@/store/themeStore';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
+import { Card } from '../ui/Card';
+import type { ThemeConfig } from '@/types';
+
+const DEFAULT_COLORS: ThemeConfig['colors'] = {
+  background: { primary: '#ffffff', secondary: '#f1f5f9' },
+  text: { primary: '#020817', secondary: '#64748b' },
+  border: '#e2e8f0',
+  primary: { accent: '#2563eb' },
+  secondary: { accent: '#475569' },
+};
+
+export const ThemeSwitcher: React.FC = () => {
+    const { customThemes, addCustomTheme, setTheme } = useThemeStore();
+    const [newName, setNewName] = React.useState('');
+    const [newColors, setNewColors] = React.useState(DEFAULT_COLORS);
+
+    const handleColorChange = (category: string, key: string, value: string) => {
+        setNewColors(prev => {
+            const cat = prev[category as keyof typeof prev] as any;
+            return { ...prev, [category]: { ...cat, [key]: value } };
+        });
+    };
+    
+    const handleSaveTheme = () => {
+        if (!newName.trim()) return;
+        addCustomTheme({ name: newName, colors: newColors });
+        setNewName('');
+    };
+
+    return (
+        <div className="space-y-6">
+            <div>
+                <h3 className="font-semibold mb-2">Base Themes</h3>
+                <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => setTheme('light')}>Light</Button>
+                    <Button variant="outline" onClick={() => setTheme('dark')}>Dark</Button>
+                </div>
+            </div>
+            
+            <div>
+                 <h3 className="font-semibold mb-2">Custom Themes</h3>
+                 <div className="grid grid-cols-2 gap-2">
+                    {customThemes.map(theme => (
+                        <Button key={theme.id} variant="secondary" onClick={() => setTheme(theme.id)}>{theme.name}</Button>
+                    ))}
+                 </div>
+            </div>
+
+            <Card className="p-4">
+                <h3 className="font-semibold mb-4">Create New Theme</h3>
+                <div className="space-y-2">
+                    <Input placeholder="Theme Name" value={newName} onChange={e => setNewName(e.target.value)} />
+                    {Object.entries(newColors).map(([category, values]) => 
+                        Object.entries(values).map(([key, value]) => (
+                             typeof value === 'string' && <div key={`${category}-${key}`} className="flex items-center justify-between text-sm">
+                                <label>{`${category}.${key}`}</label>
+                                <input type="color" value={value} onChange={e => handleColorChange(category, key, e.target.value)} className="w-8 h-8"/>
+                             </div>
+                        ))
+                    )}
+                    <Button onClick={handleSaveTheme} className="w-full">Save Theme</Button>
+                </div>
+            </Card>
+        </div>
+    );
+};
+
+// -- src/components/shared/SettingsDialog.tsx
+// Unchanged from Step 6. It already has the Tabs structure.
+
+// -- src/components/world/WorldChat.tsx
+import * as React from 'react';
+import { Button } from '../ui/Button';
+import { MessageSquare, X } from 'lucide-react';
+import { Card, CardContent, CardFooter, CardHeader } from '../ui/Card';
+import { useWorldStore } from '@/store/worldStore';
+import TextareaAutosize from 'react-textarea-autosize';
+import { ScrollArea } from '../ui/ScrollArea';
+import { db } from '@/lib/db';
+import type { User } from '@/types';
+
+export const WorldChat: React.FC = () => {
+    const [isOpen, setIsOpen] = React.useState(true);
+    const { worldChatMessages, sendWorldMessage } = useWorldStore();
+    const [message, setMessage] = React.useState('');
+    const scrollAreaRef = React.useRef<HTMLDivElement>(null);
+    const [senders, setSenders] = React.useState<Record<string, User>>({});
+
+    React.useEffect(() => {
+        // Fetch sender details for messages
+        const senderIds = [...new Set(worldChatMessages.map(m => m.senderId))];
+        senderIds.forEach(id => {
+            if (id !== 'system' && !senders[id]) {
+                db.users.get(id).then(user => {
+                    if (user) setSenders(prev => ({ ...prev, [id]: user }));
+                });
+            }
+        });
+    }, [worldChatMessages, senders]);
+
+    React.useEffect(() => {
+        // Auto-scroll to bottom
+        if (scrollAreaRef.current) {
+            scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+        }
+    }, [worldChatMessages]);
+
+    const handleSend = () => {
+        sendWorldMessage(message);
+        setMessage('');
+    };
+
+    if (!isOpen) {
+        return (
+            <Button className="absolute bottom-4 right-4 z-20" size="icon" onClick={() => setIsOpen(true)}>
+                <MessageSquare />
+            </Button>
+        );
+    }
+
+    return (
+        <Card className="absolute bottom-4 right-4 z-20 w-80 h-[50vh] flex flex-col">
+            <CardHeader className="p-2 flex-row items-center justify-between">
+                <p className="font-semibold">World Chat</p>
+                <Button variant="ghost" size="icon" onClick={() => setIsOpen(false)}><X className="h-4 w-4"/></Button>
+            </CardHeader>
+            <CardContent className="flex-1 p-2 overflow-hidden">
+                <ScrollArea className="h-full" ref={scrollAreaRef}>
+                    <div className="p-2 space-y-2">
+                    {worldChatMessages.map(msg => (
+                        <div key={msg.id} className="text-sm">
+                           <span className="font-bold">{senders[msg.senderId]?.name || 'User'}: </span>
+                           <span>{msg.content}</span>
+                        </div>
+                    ))}
+                    </div>
+                </ScrollArea>
+            </CardContent>
+            <CardFooter className="p-2">
+                <TextareaAutosize
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                    placeholder="Say something..."
+                    className="w-full bg-background-secondary p-2 rounded-md"
+                />
+            </CardFooter>
+        </Card>
+    );
+};
+
+
+// -- src/pages/WorldInstancePage.tsx
+// ... (imports)
+import { WorldChat } from '@/components/world/WorldChat';
+
+const WorldInstancePage: React.FC = () => {
+    // ... (existing logic)
+    const { addWorldMessage } = useWorldStore();
+
+    React.useEffect(() => {
+        if (worldId) {
+             startWorldSimulation(
+                worldId,
+                (player) => addPlayer(player),
+                (playerId, pos) => updatePlayerPosition(playerId, pos),
+                (msg) => addWorldMessage(msg)
+            );
+        }
+        // ... (rest of useEffect)
+    }, [worldId, navigate, leaveWorld, addPlayer, updatePlayerPosition, addWorldMessage]);
+
+    // ... (rest of component)
+
+    return (
+        <div className="h-screen w-full bg-black relative">
+            {/* ... Back button ... */}
+            <WorldCanvas players={playersInWorld} />
+            <WorldChat />
+        </div>
+    );
+};
+
+export default WorldInstancePage;

@@ -1,0 +1,685 @@
+// -- src/App.tsx
+import React, { useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { seedDatabase } from './lib/db';
+import { useAuthStore } from './store/authStore';
+import { Spinner } from './components/ui/Spinner';
+import { useWebSocketSim } from './hooks/useWebSocketSim';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from './lib/db';
+import { useChatStore } from './store/chatStore';
+import { useTheme } from './hooks/useTheme'; // Import the useTheme hook
+
+// Lazy load pages for better performance
+const HomePage = React.lazy(() => import('./pages/HomePage'));
+const LoginPage = React.lazy(() => import('./pages/LoginPage'));
+const OpenWorldPage = React.lazy(() => import('./pages/OpenWorldPage'));
+const WorldInstancePage = React.lazy(() => import('./pages/WorldInstancePage'));
+
+
+/**
+ * A component to handle protected routes.
+ * If the user is authenticated, it renders the child routes (Outlet).
+ * Otherwise, it navigates the user to the login page.
+ */
+const ProtectedRoute: React.FC = () => {
+    const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+    
+    // If authenticated, render the nested routes. If not, redirect to login.
+    return isAuthenticated ? <Outlet /> : <Navigate to="/login" replace />;
+};
+
+/**
+ * A component to handle public routes for unauthenticated users.
+ * If the user is authenticated, it redirects them to the home page.
+ * Otherwise, it renders the child routes (Outlet).
+ */
+const PublicRoute: React.FC = () => {
+    const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+
+    // If authenticated, redirect to home. If not, render the public route (e.g., login page).
+    return isAuthenticated ? <Navigate to="/" replace /> : <Outlet />;
+};
+
+/**
+ * A component that listens for real-time message updates from Dexie
+ * and syncs them with the Zustand store.
+ * This ensures messages added by the simulation or other tabs are reflected.
+ */
+const RealtimeMessageSync = () => {
+    const addIncomingMessage = useChatStore(state => state.addIncomingMessage);
+    const addWorldMessage = useWorldStore(state => state.addWorldMessage); // For world chat sync
+    
+    useEffect(() => {
+        // Hook into Dexie's creating event for messages
+        const creatingHook = (primKey: any, obj: any, trans: Dexie.Transaction) => {
+            const currentUser = useAuthStore.getState().currentUser;
+            if (obj.senderId !== currentUser?.id) {
+                // Determine if it's a regular chat message or a world message
+                // This assumes worldId is used as chatId for world messages
+                const isWorldMessage = !!useWorldStore.getState().currentWorld && obj.chatId === useWorldStore.getState().currentWorld?.id;
+
+                if (isWorldMessage) {
+                    addWorldMessage(obj);
+                } else {
+                    addIncomingMessage(obj);
+                }
+            }
+        };
+
+        db.messages.hook('creating', creatingHook);
+
+        return () => {
+            // Remove the hook when the component unmounts
+            db.messages.hook('creating').unsubscribe(creatingHook);
+        };
+    }, [addIncomingMessage, addWorldMessage]);
+
+    return null; // This component does not render anything
+};
+
+/**
+ * The main application component.
+ * It sets up routing, handles session checking, and displays a loading state
+ * while the session is being verified. It also initializes global hooks.
+ */
+const App: React.FC = () => {
+  const { checkSession, isLoading, isAuthenticated } = useAuthStore();
+
+  // Initialize the WebSocket simulation hook. It will manage its own lifecycle.
+  useWebSocketSim();
+  // Initialize theme hook to apply theme on load and manage custom themes.
+  useTheme();
+
+  useEffect(() => {
+    // Seed the database on initial load if it's empty.
+    seedDatabase().catch(console.error);
+    // Check for an existing session.
+    checkSession();
+  }, [checkSession]);
+
+  // Display a global spinner while checking the session.
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background-primary" role="status" aria-label="Loading application">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <Router>
+        {/* Only mount the real-time sync when authenticated */}
+        {isAuthenticated && <RealtimeMessageSync />}
+        <React.Suspense fallback={
+            <div className="min-h-screen flex items-center justify-center bg-background-primary" role="status" aria-label="Loading content">
+                <Spinner size="lg" />
+            </div>
+        }>
+            <Routes>
+                {/* Routes for unauthenticated users */}
+                <Route element={<PublicRoute />}>
+                    <Route path="/login" element={<LoginPage />} />
+                </Route>
+
+                {/* Routes for authenticated users */}
+                <Route element={<ProtectedRoute />}>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/open-world" element={<OpenWorldPage />} />
+                    <Route path="/open-world/:worldId" element={<WorldInstancePage />} />
+                </Route>
+                
+                {/* Fallback route - if no other route matches */}
+                <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+        </React.Suspense>
+    </Router>
+  );
+};
+
+export default App;
+
+// -- src/components/layout/MainLayout.tsx
+import * as React from 'react';
+import { Sidebar } from '../chat/Sidebar';
+import { useChatStore } from '@/store/chatStore';
+import { MessageSquare } from 'lucide-react';
+import { ChatView } from '../chat/ChatView';
+import { SettingsDialog } from '../shared/SettingsDialog';
+import { CreateChatDialog } from '../chat/CreateChatDialog';
+import { Button } from '../ui/Button'; // Assuming Button is a UI component
+
+export const MainLayout: React.FC = () => {
+    const activeChatId = useChatStore((state) => state.activeChatId);
+    const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+    const [isCreateChatOpen, setIsCreateChatOpen] = React.useState(false);
+    const [isSidebarOpen, setIsSidebarOpen] = React.useState(true); // State for responsive sidebar
+
+    const toggleSidebar = () => setIsSidebarOpen(prev => !prev);
+
+    return (
+        <>
+            <div className="flex h-screen w-full bg-background-primary text-text-primary">
+                {/* Mobile sidebar toggle button */}
+                <div className="md:hidden absolute top-2 left-2 z-30">
+                    <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        onClick={toggleSidebar}
+                        aria-label={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+                    >
+                        {/* You might want a Menu icon here */}
+                        <MessageSquare className="h-6 w-6" /> 
+                    </Button>
+                </div>
+
+                {/* Left Panel: Sidebar - Responsive behavior */}
+                <aside className={`h-full flex flex-col border-r border-border bg-background-secondary 
+                                  md:relative fixed top-0 left-0 w-80 z-20 transition-transform duration-300 ease-in-out
+                                  ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
+                    <Sidebar 
+                        onNewChat={() => { setIsCreateChatOpen(true); if (window.innerWidth < 768) setIsSidebarOpen(false); }}
+                        onSettings={() => { setIsSettingsOpen(true); if (window.innerWidth < 768) setIsSidebarOpen(false); }}
+                        onCloseSidebar={() => setIsSidebarOpen(false)} // For mobile close button
+                    />
+                </aside>
+
+                {/* Main Content Area */}
+                <main className="flex-1 h-full flex flex-col md:ml-0 transition-all duration-300 ease-in-out">
+                    {activeChatId ? (
+                        <ChatView key={activeChatId} />
+                    ) : (
+                        <div className="flex h-full flex-col items-center justify-center text-text-secondary p-4" role="status">
+                            <MessageSquare size={48} className="mb-4" aria-hidden="true" />
+                            <h2 className="text-2xl font-semibold text-center">Welcome to QuikChat</h2>
+                            <p className="text-center">Select a conversation to start messaging.</p>
+                        </div>
+                    )}
+                </main>
+            </div>
+            
+            <SettingsDialog isOpen={isSettingsOpen} onOpenChange={setIsSettingsOpen} />
+            <CreateChatDialog isOpen={isCreateChatOpen} onOpenChange={setIsCreateChatOpen} />
+        </>
+    );
+};
+
+// -- src/components/chat/Sidebar.tsx
+import * as React from 'react';
+import { Globe, LogOut, Plus, Settings, User as UserIcon, X } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+import { useChatStore } from '@/store/chatStore';
+import { Button } from '../ui/Button';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { ScrollArea } from '../ui/ScrollArea';
+import { Skeleton } from '../ui/Skeleton';
+import { db } from '@/lib/db';
+import { useLiveQuery } from 'dexie-react-hooks';
+import type { Chat, User } from '@/types';
+import { getChatPartner } from '@/lib/api';
+import { cn, timeAgo } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { useNavigate } from 'react-router-dom';
+
+interface SidebarProps {
+    onNewChat: () => void;
+    onSettings: () => void;
+    onCloseSidebar: () => void; // Added for responsive closing
+}
+
+/**
+ * The main sidebar component, containing the user menu, action icons, and the chat list.
+ */
+export const Sidebar: React.FC<SidebarProps> = ({ onNewChat, onSettings, onCloseSidebar }) => {
+  return (
+    // Responsive adjustments are applied by MainLayout's containing aside element
+    <>
+      <UserMenu onNewChat={onNewChat} onSettings={onSettings} onCloseSidebar={onCloseSidebar} />
+      <ChatList />
+    </>
+  );
+};
+
+/**
+ * Renders the user menu at the top of the sidebar.
+ * Includes user avatar, name, and a popover for actions like logout.
+ */
+const UserMenu: React.FC<SidebarProps> = ({ onNewChat, onSettings, onCloseSidebar }) => {
+  const { currentUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
+  }
+
+  return (
+    <div className="p-2 flex justify-between items-center border-b border-border">
+        {/* Close button for mobile sidebar */}
+        <div className="md:hidden flex-shrink-0 mr-2">
+            <Button variant="ghost" size="icon" onClick={onCloseSidebar} aria-label="Close sidebar">
+                <X className="h-5 w-5" />
+            </Button>
+        </div>
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button variant="ghost" className="w-full justify-start h-auto p-2" aria-label={`Open user menu for ${currentUser?.name || 'current user'}`}>
+            <Avatar className="h-9 w-9 mr-3">
+              <AvatarImage src={currentUser?.avatar} alt={`Avatar of ${currentUser?.name}`} />
+              <AvatarFallback>{currentUser?.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="text-left flex-1 min-w-0"> {/* Use flex-1 min-w-0 for truncation */}
+              <p className="font-semibold text-sm truncate text-text-primary">{currentUser?.name}</p>
+            </div>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-56 p-2" align="start">
+          <Button variant="ghost" className="w-full justify-start" aria-label="View Profile">
+            <UserIcon className="mr-2 h-4 w-4" /> View Profile
+          </Button>
+          <Button variant="ghost" className="w-full justify-start text-status-error hover:text-status-error" onClick={handleLogout} aria-label="Log Out">
+            <LogOut className="mr-2 h-4 w-4" /> Log Out
+          </Button>
+        </PopoverContent>
+      </Popover>
+      <TooltipProvider delayDuration={100}>
+        <div className="flex items-center flex-shrink-0">
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={() => navigate('/open-world')} aria-label="Open World">
+                        <Globe className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Open World</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={onNewChat} aria-label="Start a new chat">
+                        <Plus className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>New Chat</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={onSettings} aria-label="Open settings">
+                        <Settings className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Settings</p></TooltipContent>
+            </Tooltip>
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+};
+
+/**
+ * Renders the scrollable list of chats.
+ * Uses Dexie's useLiveQuery for real-time updates.
+ */
+const ChatList: React.FC = () => {
+  const { currentUser } = useAuth();
+  const chats = useLiveQuery(
+    () => db.chats
+        .where('participantIds').equals(currentUser!.id)
+        .sortBy('lastMessage.timestamp')
+        .then(c => c.reverse()),
+    [currentUser?.id], // Depend on currentUser.id for re-fetching
+    [] as Chat[]
+  );
+  
+  if (!currentUser) return null;
+  const isLoading = chats.length === 0 && (chats as any)._state !== 2; // Check Dexie's internal state for loading
+
+  return (
+    <ScrollArea className="flex-1" aria-label="Chat conversations">
+      {isLoading && <ChatListSkeleton />}
+      {!isLoading && chats.length === 0 && (
+        <div className="p-4 text-center text-sm text-text-secondary" role="alert">
+          No chats yet. Start a new conversation!
+        </div>
+      )}
+      {!isLoading && chats.map(chat => (
+        <ChatItem key={chat.id} chat={chat} currentUserId={currentUser.id} />
+      ))}
+    </ScrollArea>
+  );
+};
+
+/**
+ * Renders a single chat item in the chat list.
+ */
+const ChatItem: React.FC<{ chat: Chat; currentUserId: string }> = ({ chat, currentUserId }) => {
+  const { activeChatId, setActiveChatId } = useChatStore();
+  const [partner, setPartner] = React.useState<User | null>(null);
+
+  React.useEffect(() => {
+    if (!chat.isGroup) {
+      getChatPartner(chat, currentUserId).then(p => setPartner(p || null));
+    }
+  }, [chat, currentUserId]);
+
+  const displayName = chat.isGroup ? chat.name : partner?.name;
+  const displayAvatar = chat.isGroup ? chat.avatar : partner?.avatar;
+  const isActive = chat.id === activeChatId;
+  
+  // When a chat is active, its unread count should be 0.
+  const unreadCount = isActive ? 0 : chat.unreadCount;
+
+  return (
+    <Button
+      variant="ghost"
+      onClick={() => setActiveChatId(chat.id)}
+      className={cn(
+        "w-full h-auto p-2 justify-start rounded-none",
+        isActive && "bg-primary-accent/10"
+      )}
+      aria-current={isActive ? 'page' : undefined}
+      aria-label={`Open chat with ${displayName || 'unknown user'}${unreadCount > 0 ? `, ${unreadCount} unread messages` : ''}`}
+    >
+      <Avatar className="h-11 w-11 mr-3">
+        <AvatarImage src={displayAvatar} alt={`Avatar of ${displayName}`} loading="lazy" />
+        <AvatarFallback>{displayName?.charAt(0)}</AvatarFallback>
+      </Avatar>
+      <div className="w-full overflow-hidden">
+        <div className="flex justify-between items-center">
+          <p className="font-semibold text-sm truncate text-text-primary">{displayName || '...'}</p>
+          {chat.lastMessage && <p className="text-xs text-text-secondary">{timeAgo(chat.lastMessage.timestamp)}</p>}
+        </div>
+        <div className="flex justify-between items-start">
+          <p className="text-xs text-text-secondary truncate pr-2">
+            {chat.lastMessage?.content || 'No messages yet'}
+          </p>
+          {unreadCount > 0 && (
+             <span className="bg-primary-accent text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center" aria-label={`${unreadCount} unread messages`}>
+                {unreadCount}
+             </span>
+          )}
+        </div>
+      </div>
+    </Button>
+  );
+};
+
+/**
+ * Renders a skeleton loading state for the chat list.
+ */
+const ChatListSkeleton: React.FC = () => {
+    return (
+        <div className="p-2 space-y-2" role="progressbar" aria-label="Loading chats">
+            {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center p-2">
+                    <Skeleton className="h-11 w-11 rounded-full" />
+                    <div className="ml-3 space-y-2 w-full">
+                        <div className="flex justify-between">
+                            <Skeleton className="h-4 w-2/5" />
+                            <Skeleton className="h-3 w-1/5" />
+                        </div>
+                        <Skeleton className="h-3 w-4/5" />
+                    </div>
+                </div>
+            ))}
+        </div>
+    )
+}
+
+// -- src/components/ui/ThemeToggle.tsx
+import * as React from 'react';
+import { Moon, Sun } from 'lucide-react';
+import { Button } from '@/components/ui/Button';
+import { useThemeStore } from '@/store/themeStore'; // Use the Zustand store
+
+export function ThemeToggle() {
+  const { currentThemeId, setTheme } = useThemeStore();
+
+  const toggleTheme = () => {
+    setTheme(currentThemeId === 'dark' ? 'light' : 'dark');
+  };
+
+  return (
+    <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+      <Sun className="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+      <Moon className="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+      <span className="sr-only">Toggle theme</span>
+    </Button>
+  );
+}
+
+// -- src/components/world/WorldCanvas.tsx
+import * as React from 'react';
+import type { Player } from '@/types';
+import { useAuthStore } from '@/store/authStore';
+import { useWorldStore } from '@/store/worldStore';
+
+interface WorldCanvasProps {
+    players: Player[];
+}
+
+export const WorldCanvas: React.FC<WorldCanvasProps> = React.memo(({ players }) => {
+    const canvasRef = React.useRef<HTMLCanvasElement>(null);
+    const { currentUser } = useAuthStore();
+    const { updatePlayerPosition } = useWorldStore();
+    
+    // Movement state
+    const keysPressed = React.useRef<{ [key: string]: boolean }>({});
+
+    // Player movement speed
+    const playerSpeed = 3;
+
+    React.useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const handleKeyDown = (e: KeyboardEvent) => { keysPressed.current[e.key.toLowerCase()] = true; };
+        const handleKeyUp = (e: KeyboardEvent) => { keysPressed.current[e.key.toLowerCase()] = false; };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        
+        // Handle canvas resizing
+        const resizeCanvas = () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        };
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // Initial resize
+
+        let animationFrameId: number;
+
+        const render = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas
+
+            // Update current player position based on input
+            if (currentUser) {
+                const me = players.find(p => p.id === currentUser.id);
+                if (me) {
+                    let { x, y } = me.position;
+                    let positionChanged = false;
+
+                    if ((keysPressed.current['w'] || keysPressed.current['arrowup']) && y > 0) { y -= playerSpeed; positionChanged = true; }
+                    if ((keysPressed.current['s'] || keysPressed.current['arrowdown']) && y < canvas.height) { y += playerSpeed; positionChanged = true; }
+                    if ((keysPressed.current['a'] || keysPressed.current['arrowleft']) && x > 0) { x -= playerSpeed; positionChanged = true; }
+                    if ((keysPressed.current['d'] || keysPressed.current['arrowright']) && x < canvas.width) { x += playerSpeed; positionChanged = true; }
+                    
+                    if (positionChanged) {
+                        updatePlayerPosition(currentUser.id, { x, y });
+                    }
+                }
+            }
+            
+            // Draw all players
+            players.forEach(player => {
+                // Draw avatar (simple circle for now)
+                ctx.beginPath();
+                ctx.arc(player.position.x, player.position.y, 15, 0, 2 * Math.PI);
+                ctx.fillStyle = player.id === currentUser?.id ? 'rgba(0, 123, 255, 0.8)' : 'rgba(255, 99, 71, 0.8)'; // Blue for me, red for others
+                ctx.fill();
+                ctx.closePath();
+
+                // Draw name
+                ctx.fillStyle = 'white';
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 14px "Open Sans", sans-serif'; // Use consistent font
+                ctx.fillText(player.name, player.position.x, player.position.y - 25);
+            });
+
+            animationFrameId = window.requestAnimationFrame(render);
+        };
+        render();
+
+        return () => {
+            window.cancelAnimationFrame(animationFrameId);
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+            window.removeEventListener('resize', resizeCanvas);
+        };
+    }, [players, currentUser, updatePlayerPosition, playerSpeed]);
+
+    return <canvas ref={canvasRef} className="w-full h-full block" role="img" aria-label="Interactive open world canvas with players" />;
+});
+WorldCanvas.displayName = 'WorldCanvas'; // Add display name for React DevTools
+
+// -- src/components/world/WorldChat.tsx
+import * as React from 'react';
+import { Button } from '../ui/Button';
+import { MessageSquare, X, Send } from 'lucide-react';
+import { Card, CardContent, CardFooter, CardHeader } from '../ui/Card';
+import { useWorldStore } from '@/store/worldStore';
+import TextareaAutosize from 'react-textarea-autosize';
+import { ScrollArea } from '../ui/ScrollArea';
+import { db } from '@/lib/db';
+import type { User } from '@/types';
+import { useAuthStore } from '@/store/authStore';
+import { timeAgo } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+
+
+export const WorldChat: React.FC = () => {
+    const [isOpen, setIsOpen] = React.useState(true);
+    const { worldChatMessages, sendWorldMessage } = useWorldStore();
+    const { currentUser } = useAuthStore();
+    const [message, setMessage] = React.useState('');
+    const scrollAreaRef = React.useRef<HTMLDivElement>(null);
+    const [senders, setSenders] = React.useState<Record<string, User>>({});
+
+    // Fetch sender details for messages
+    React.useEffect(() => {
+        const fetchSenders = async () => {
+            const senderIds = [...new Set(worldChatMessages.map(m => m.senderId))];
+            const newSenders: Record<string, User> = {};
+            for (const id of senderIds) {
+                if (id !== 'system' && !senders[id]) {
+                    const user = await db.users.get(id);
+                    if (user) newSenders[id] = user;
+                }
+            }
+            if (Object.keys(newSenders).length > 0) {
+                setSenders(prev => ({ ...prev, ...newSenders }));
+            }
+        };
+        fetchSenders();
+    }, [worldChatMessages, senders]);
+
+    // Auto-scroll to bottom
+    React.useLayoutEffect(() => {
+        if (scrollAreaRef.current) {
+            scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+        }
+    }, [worldChatMessages]);
+
+    const handleSend = () => {
+        if (message.trim()) {
+            sendWorldMessage(message);
+            setMessage('');
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    };
+
+    if (!isOpen) {
+        return (
+            <Button 
+                className="fixed bottom-4 right-4 z-20 md:absolute" 
+                size="icon" 
+                onClick={() => setIsOpen(true)}
+                aria-label="Open world chat"
+            >
+                <MessageSquare className="h-5 w-5" />
+            </Button>
+        );
+    }
+
+    return (
+        <Card className="fixed bottom-4 right-4 z-20 w-80 h-[50vh] flex flex-col md:absolute">
+            <CardHeader className="p-2 flex-row items-center justify-between border-b border-border">
+                <p className="font-semibold text-text-primary">World Chat</p>
+                <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    onClick={() => setIsOpen(false)}
+                    aria-label="Close world chat"
+                >
+                    <X className="h-4 w-4"/>
+                </Button>
+            </CardHeader>
+            <CardContent className="flex-1 p-2 overflow-hidden">
+                <ScrollArea className="h-full" viewportRef={scrollAreaRef} aria-label="World chat messages">
+                    <div className="p-2 space-y-2">
+                    {worldChatMessages.map(msg => (
+                        <div key={msg.id} className="flex items-start gap-2">
+                           {msg.senderId !== 'system' && (
+                                <Avatar className="h-6 w-6">
+                                    <AvatarImage src={senders[msg.senderId]?.avatar} alt={senders[msg.senderId]?.name} />
+                                    <AvatarFallback className="text-xs">{senders[msg.senderId]?.name.charAt(0)}</AvatarFallback>
+                                </Avatar>
+                           )}
+                           <div className="flex flex-col">
+                               <TooltipProvider>
+                                   <Tooltip>
+                                       <TooltipTrigger asChild>
+                                           <span className="text-sm">
+                                               <span className="font-bold text-primary-accent">{senders[msg.senderId]?.name || 'System'}: </span>
+                                               {msg.content}
+                                           </span>
+                                       </TooltipTrigger>
+                                       <TooltipContent>
+                                           <p>{msg.timestamp.toLocaleString()}</p>
+                                       </TooltipContent>
+                                   </Tooltip>
+                               </TooltipProvider>
+                               <span className="text-xs text-text-secondary opacity-70 ml-auto">{timeAgo(msg.timestamp)}</span>
+                           </div>
+                        </div>
+                    ))}
+                    {!worldChatMessages.length && (
+                        <div className="text-center text-sm text-text-secondary py-4" role="status">No messages in this world yet.</div>
+                    )}
+                    </div>
+                </ScrollArea>
+            </CardContent>
+            <CardFooter className="p-2 border-t border-border">
+                <TextareaAutosize
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Say something..."
+                    className="flex-1 bg-background-primary p-2 rounded-md border border-border resize-none focus:outline-none focus:ring-1 focus:ring-primary-accent text-sm mr-2"
+                    aria-label="Message input for world chat"
+                    disabled={!currentUser}
+                />
+                <Button onClick={handleSend} size="icon" disabled={!message.trim() || !currentUser} aria-label="Send message">
+                    <Send className="h-5 w-5" />
+                </Button>
+            </CardFooter>
+        </Card>
+    );
+};

@@ -1,0 +1,395 @@
+// -- src/lib/api.ts
+import { db } from './db';
+import type { Chat, User } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+
+/**
+ * Simulates network delay.
+ * @param ms - The number of milliseconds to wait.
+ */
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- AUTHENTICATION API (from Step 2) ---
+
+export const register = async (name: string, email: string, password: string): Promise<User> => {
+  await wait(1000); 
+  const existingUser = await db.users.where('email').equals(email).first();
+  if (existingUser) {
+    throw new Error('Email already in use.');
+  }
+  const newUser: User = {
+    id: uuidv4(), name, email, passwordHash: password, avatar: `https://i.pravatar.cc/150?u=${uuidv4()}`, isOnline: true, createdAt: new Date(), friends: [],
+  };
+  await db.users.add(newUser);
+  return newUser;
+};
+
+export const login = async (email: string, password: string): Promise<User> => {
+  await wait(1000); 
+  const user = await db.users.where('email').equals(email).first();
+  if (!user || user.passwordHash !== password) {
+    throw new Error('Invalid email or password.');
+  }
+  await db.users.update(user.id, { isOnline: true });
+  return { ...user, isOnline: true };
+};
+
+export const quickLogin = async (userId: string): Promise<User> => {
+  await wait(500);
+  const user = await db.users.get(userId);
+  if (!user) {
+    throw new Error('User not found.');
+  }
+  await db.users.update(user.id, { isOnline: true });
+  return { ...user, isOnline: true };
+};
+
+export const logout = async (userId: string): Promise<void> => {
+    await wait(500);
+    if (userId) {
+        await db.users.update(userId, { isOnline: false });
+    }
+    return;
+};
+
+export const getUserById = async (userId: string): Promise<User | undefined> => {
+    await wait(300);
+    return db.users.get(userId);
+};
+
+
+// --- CHAT API ---
+
+/**
+ * Fetches all chats for a given user.
+ * This is an example of a direct API call. In the app, we'll often use useLiveQuery for real-time updates.
+ * @param userId - The ID of the user.
+ * @returns A promise that resolves to an array of chats, sorted by the most recent message.
+ */
+export const getChatsForUser = async (userId: string): Promise<Chat[]> => {
+    await wait(700); // Simulate network delay
+    const chats = await db.chats.where('participantIds').equals(userId).toArray();
+    
+    // Sort by last message timestamp, descending
+    return chats.sort((a, b) => {
+        const timeA = a.lastMessage?.timestamp.getTime() || 0;
+        const timeB = b.lastMessage?.timestamp.getTime() || 0;
+        return timeB - timeA;
+    });
+};
+
+/**
+ * Gets the "partner" user in a 1-on-1 chat.
+ * @param chat - The chat object.
+ * @param currentUserId - The ID of the currently logged-in user.
+ * @returns The other participant's user object, or undefined if not found or it's a group chat.
+ */
+export const getChatPartner = async (chat: Chat, currentUserId: string): Promise<User | undefined> => {
+    if (chat.isGroup) return undefined;
+    const partnerId = chat.participantIds.find(id => id !== currentUserId);
+    if (!partnerId) return undefined;
+    return await db.users.get(partnerId);
+};
+
+// -- src/store/chatStore.ts
+import create from 'zustand';
+import type { Chat } from '../types';
+
+interface ChatState {
+  chats: Chat[];
+  activeChatId: string | null;
+  isLoading: boolean;
+  setChats: (chats: Chat[]) => void;
+  setActiveChatId: (chatId: string | null) => void;
+  setLoading: (isLoading: boolean) => void;
+}
+
+/**
+ * Zustand store for managing chat-related state.
+ * This includes the list of chats, the currently active chat, and loading states.
+ */
+export const useChatStore = create<ChatState>((set) => ({
+  chats: [],
+  activeChatId: null,
+  isLoading: true,
+
+  /**
+   * Sets the list of chats in the store.
+   * @param chats - An array of chat objects.
+   */
+  setChats: (chats) => set({ chats, isLoading: false }),
+
+  /**
+   * Sets the ID of the currently active chat.
+   * @param chatId - The ID of the chat to set as active, or null to clear.
+   */
+  setActiveChatId: (chatId) => set({ activeChatId: chatId }),
+  
+  /**
+   * Sets the loading state for chats.
+   * @param isLoading - A boolean indicating if chats are being loaded.
+   */
+  setLoading: (isLoading) => set({ isLoading }),
+}));
+
+// -- src/components/ui/Skeleton.tsx
+import { cn } from "@/lib/utils"
+
+function Skeleton({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn("animate-pulse rounded-md bg-background-secondary", className)}
+      {...props}
+    />
+  )
+}
+
+export { Skeleton }
+
+// -- src/components/layout/MainLayout.tsx
+import * as React from 'react';
+import { Sidebar } from '../chat/Sidebar';
+import { useChatStore } from '@/store/chatStore';
+import { MessageSquare } from 'lucide-react';
+
+/**
+ * The main two-panel layout for the authenticated part of the application.
+ * It consists of a fixed-width sidebar on the left and a main content area on the right.
+ */
+export const MainLayout: React.FC = () => {
+    const activeChatId = useChatStore((state) => state.activeChatId);
+
+    return (
+        <div className="flex h-screen w-full bg-background-primary text-text-primary">
+            {/* Left Panel: Sidebar */}
+            <Sidebar />
+
+            {/* Right Panel: Main Content */}
+            <main className="flex-1 h-full">
+                {activeChatId ? (
+                    // Placeholder for the ChatView component
+                    <div className="flex h-full items-center justify-center">
+                        <p>ChatView for {activeChatId} will be here.</p>
+                    </div>
+                ) : (
+                    // Welcome message when no chat is selected
+                    <div className="flex h-full flex-col items-center justify-center text-text-secondary">
+                        <MessageSquare size={48} className="mb-4" />
+                        <h2 className="text-2xl font-semibold">Welcome to QuikChat</h2>
+                        <p>Select a conversation to start messaging.</p>
+                    </div>
+                )}
+            </main>
+        </div>
+    );
+};
+
+// -- src/components/chat/Sidebar.tsx
+import * as React from 'react';
+import { Globe, LogOut, Plus, Settings, User as UserIcon } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+import { useChatStore } from '@/store/chatStore';
+import { Button } from '../ui/Button';
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/Popover';
+import { ScrollArea } from '../ui/ScrollArea';
+import { Skeleton } from '../ui/Skeleton';
+import { db } from '@/lib/db';
+import { useLiveQuery } from 'dexie-react-hooks';
+import type { Chat, User } from '@/types';
+import { getChatPartner } from '@/lib/api';
+import { cn, timeAgo } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/Tooltip';
+import { useNavigate } from 'react-router-dom';
+
+/**
+ * The main sidebar component, containing the user menu, action icons, and the chat list.
+ */
+export const Sidebar: React.FC = () => {
+  return (
+    <aside className="w-80 h-full flex flex-col border-r border-border bg-background-secondary">
+      <UserMenu />
+      <ChatList />
+    </aside>
+  );
+};
+
+/**
+ * Renders the user menu at the top of the sidebar.
+ * Includes user avatar, name, and a popover for actions like logout.
+ */
+const UserMenu: React.FC = () => {
+  const { currentUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
+  }
+
+  return (
+    <div className="p-2 flex justify-between items-center border-b border-border">
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button variant="ghost" className="w-full justify-start h-auto p-2">
+            <Avatar className="h-9 w-9 mr-3">
+              <AvatarImage src={currentUser?.avatar} alt={currentUser?.name} />
+              <AvatarFallback>{currentUser?.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="text-left">
+              <p className="font-semibold text-sm text-text-primary">{currentUser?.name}</p>
+            </div>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-56 p-2">
+          <Button variant="ghost" className="w-full justify-start">
+            <UserIcon className="mr-2 h-4 w-4" /> View Profile
+          </Button>
+          <Button variant="ghost" className="w-full justify-start text-status-error hover:text-status-error" onClick={handleLogout}>
+            <LogOut className="mr-2 h-4 w-4" /> Log Out
+          </Button>
+        </PopoverContent>
+      </Popover>
+      <TooltipProvider delayDuration={100}>
+        <div className="flex items-center">
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon"><Globe className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>Open World</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon"><Plus className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>New Chat</p></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+                <TooltipTrigger asChild><Button variant="ghost" size="icon"><Settings className="h-5 w-5" /></Button></TooltipTrigger>
+                <TooltipContent><p>Settings</p></TooltipContent>
+            </Tooltip>
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+};
+
+/**
+ * Renders the scrollable list of chats.
+ * Uses Dexie's useLiveQuery for real-time updates.
+ */
+const ChatList: React.FC = () => {
+  const { currentUser } = useAuth();
+  const chats = useLiveQuery(
+    () => db.chats
+        .where('participantIds').equals(currentUser!.id)
+        .sortBy('lastMessage.timestamp')
+        .then(c => c.reverse()),
+    [currentUser],
+    [] as Chat[]
+  );
+  
+  if (!currentUser) return null;
+  const isLoading = chats.length === 0 && !useLiveQuery.hasResolved;
+
+  return (
+    <ScrollArea className="flex-1">
+      {isLoading && <ChatListSkeleton />}
+      {!isLoading && chats.length === 0 && (
+        <div className="p-4 text-center text-sm text-text-secondary">
+          No chats yet. Start a new conversation!
+        </div>
+      )}
+      {!isLoading && chats.map(chat => (
+        <ChatItem key={chat.id} chat={chat} currentUserId={currentUser.id} />
+      ))}
+    </ScrollArea>
+  );
+};
+
+/**
+ * Renders a single chat item in the chat list.
+ */
+const ChatItem: React.FC<{ chat: Chat; currentUserId: string }> = ({ chat, currentUserId }) => {
+  const { activeChatId, setActiveChatId } = useChatStore();
+  const [partner, setPartner] = React.useState<User | null>(null);
+
+  React.useEffect(() => {
+    if (!chat.isGroup) {
+      getChatPartner(chat, currentUserId).then(p => setPartner(p || null));
+    }
+  }, [chat, currentUserId]);
+
+  const displayName = chat.isGroup ? chat.name : partner?.name;
+  const displayAvatar = chat.isGroup ? chat.avatar : partner?.avatar;
+  const isActive = chat.id === activeChatId;
+
+  return (
+    <Button
+      variant="ghost"
+      onClick={() => setActiveChatId(chat.id)}
+      className={cn(
+        "w-full h-auto p-2 justify-start rounded-none",
+        isActive && "bg-primary-accent/10"
+      )}
+    >
+      <Avatar className="h-11 w-11 mr-3">
+        <AvatarImage src={displayAvatar} alt={displayName} />
+        <AvatarFallback>{displayName?.charAt(0)}</AvatarFallback>
+      </Avatar>
+      <div className="w-full overflow-hidden">
+        <div className="flex justify-between items-center">
+          <p className="font-semibold text-sm truncate text-text-primary">{displayName || '...'}</p>
+          {chat.lastMessage && <p className="text-xs text-text-secondary">{timeAgo(chat.lastMessage.timestamp)}</p>}
+        </div>
+        <div className="flex justify-between items-start">
+          <p className="text-xs text-text-secondary truncate pr-2">
+            {chat.lastMessage?.content || 'No messages yet'}
+          </p>
+          {chat.unreadCount > 0 && (
+             <span className="bg-primary-accent text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
+                {chat.unreadCount}
+             </span>
+          )}
+        </div>
+      </div>
+    </Button>
+  );
+};
+
+/**
+ * Renders a skeleton loading state for the chat list.
+ */
+const ChatListSkeleton: React.FC = () => {
+    return (
+        <div className="p-2 space-y-2">
+            {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center p-2">
+                    <Skeleton className="h-11 w-11 rounded-full" />
+                    <div className="ml-3 space-y-2 w-full">
+                        <div className="flex justify-between">
+                            <Skeleton className="h-4 w-2/5" />
+                            <Skeleton className="h-3 w-1/5" />
+                        </div>
+                        <Skeleton className="h-3 w-4/5" />
+                    </div>
+                </div>
+            ))}
+        </div>
+    )
+}
+
+// -- src/pages/HomePage.tsx
+import * as React from 'react';
+import { MainLayout } from '@/components/layout/MainLayout';
+
+/**
+ * The main home page for authenticated users.
+ * It renders the MainLayout which contains the core application UI.
+ */
+const HomePage: React.FC = () => {
+  return (
+    <MainLayout />
+  );
+};
+
+export default HomePage;

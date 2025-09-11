@@ -1,0 +1,528 @@
+// -- src/types/index.ts
+// ... (existing types from previous steps)
+
+// Represents a player within an Open World.
+export interface Player {
+  id: string; // User ID
+  name: string;
+  avatar: string;
+  position: {
+    x: number;
+    y: number;
+  };
+}
+
+// -- src/lib/api.ts
+// ... (existing API functions from previous steps)
+
+// --- OPEN WORLD API ---
+
+/**
+ * Fetches all available open worlds from the database.
+ * @returns A promise that resolves to an array of OpenWorld objects.
+ */
+export const getOpenWorlds = async (): Promise<OpenWorld[]> => {
+    await wait(800); // Simulate network delay
+    return db.openWorlds.toArray();
+};
+
+/**
+ * Simulates joining a world, validating the password if required.
+ * @param worldId - The ID of the world to join.
+ * @param password - The password provided by the user (if any).
+ * @returns The joined OpenWorld object.
+ * @throws An error if the world is not found or the password is incorrect.
+ */
+export const joinWorld = async (worldId: string, password?: string): Promise<OpenWorld> => {
+    await wait(1000); // Simulate joining delay
+    const world = await db.openWorlds.get(worldId);
+
+    if (!world) {
+        throw new Error("World not found.");
+    }
+
+    if (world.isPasswordProtected && world.password !== password) {
+        throw new Error("Invalid password.");
+    }
+
+    return world;
+};
+
+// -- src/lib/simulation.ts
+// ... (existing chat simulation logic)
+
+let worldSimulationInterval: NodeJS.Timeout | null = null;
+const players: Map<string, { position: { x: number, y: number }, velocity: { x: number, y: number } }> = new Map();
+
+/**
+ * Starts the world simulation for mock players.
+ * @param worldId - The ID of the world to simulate.
+ * @param addPlayer - Callback to add a new player to the world state.
+ * @param updatePlayerPosition - Callback to update an existing player's position.
+ * @param removePlayer - Callback to remove a player from the world state.
+ */
+export const startWorldSimulation = (
+    worldId: string,
+    addPlayer: (worldId: string, player: any) => void,
+    updatePlayerPosition: (worldId: string, playerId: string, position: { x: number, y: number }) => void,
+    removePlayer: (worldId: string, playerId: string) => void
+) => {
+    if (worldSimulationInterval) return;
+
+    console.log(`Starting world simulation for ${worldId}...`);
+
+    // Initial population
+    db.users.limit(5).toArray().then(mockUsers => {
+        mockUsers.forEach(user => {
+            if (!players.has(user.id)) {
+                const player = {
+                    id: user.id,
+                    name: user.name,
+                    avatar: user.avatar,
+                    position: { x: Math.random() * 800, y: Math.random() * 600 }
+                };
+                players.set(user.id, { position: player.position, velocity: { x: (Math.random() - 0.5) * 2, y: (Math.random() - 0.5) * 2 } });
+                addPlayer(worldId, player);
+            }
+        });
+    });
+
+    worldSimulationInterval = setInterval(() => {
+        // Update player positions
+        players.forEach((player, playerId) => {
+            let { x, y } = player.position;
+            let { x: vx, y: vy } = player.velocity;
+
+            x += vx;
+            y += vy;
+
+            // Bounce off walls
+            if (x < 0 || x > 800) vx = -vx;
+            if (y < 0 || y > 600) vy = -vy;
+
+            player.position = { x, y };
+            player.velocity = { x: vx, y: vy };
+            
+            updatePlayerPosition(worldId, playerId, { x, y });
+        });
+    }, 1000 / 60); // 60 FPS
+};
+
+/**
+ * Stops the world simulation.
+ */
+export const stopWorldSimulation = () => {
+    if (worldSimulationInterval) {
+        clearInterval(worldSimulationInterval);
+        worldSimulationInterval = null;
+        players.clear();
+        console.log("World simulation stopped.");
+    }
+};
+
+// -- src/store/worldStore.ts
+import create from 'zustand';
+import type { OpenWorld, Player } from '../types';
+import * as api from '../lib/api';
+import { useAuthStore } from './authStore';
+
+interface WorldState {
+  openWorlds: OpenWorld[];
+  currentWorld: OpenWorld | null;
+  playersInWorld: Player[];
+  isLoadingWorlds: boolean;
+  isJoiningWorld: boolean;
+  error: string | null;
+
+  fetchOpenWorlds: () => Promise<void>;
+  joinWorld: (worldId: string, password?: string) => Promise<boolean>;
+  leaveWorld: () => void;
+  updatePlayerPosition: (playerId: string, position: { x: number, y: number }) => void;
+  addPlayer: (player: Player) => void;
+  removePlayer: (playerId: string) => void;
+}
+
+export const useWorldStore = create<WorldState>((set, get) => ({
+    openWorlds: [],
+    currentWorld: null,
+    playersInWorld: [],
+    isLoadingWorlds: false,
+    isJoiningWorld: false,
+    error: null,
+
+    fetchOpenWorlds: async () => {
+        set({ isLoadingWorlds: true });
+        try {
+            const worlds = await api.getOpenWorlds();
+            set({ openWorlds: worlds, isLoadingWorlds: false });
+        } catch (error) {
+            console.error("Failed to fetch worlds:", error);
+            set({ isLoadingWorlds: false, error: "Could not load worlds." });
+        }
+    },
+
+    joinWorld: async (worldId, password) => {
+        set({ isJoiningWorld: true, error: null });
+        try {
+            const world = await api.joinWorld(worldId, password);
+            const currentUser = useAuthStore.getState().currentUser;
+            if (!currentUser) throw new Error("User not authenticated");
+
+            const currentPlayer: Player = {
+                id: currentUser.id,
+                name: currentUser.name,
+                avatar: currentUser.avatar,
+                position: { x: 400, y: 300 } // Start in center
+            };
+
+            set({ currentWorld: world, isJoiningWorld: false, playersInWorld: [currentPlayer] });
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "Failed to join world.";
+            console.error(errorMessage);
+            set({ isJoiningWorld: false, error: errorMessage });
+            return false;
+        }
+    },
+
+    leaveWorld: () => {
+        set({ currentWorld: null, playersInWorld: [] });
+    },
+    
+    updatePlayerPosition: (playerId, position) => {
+        set(state => ({
+            playersInWorld: state.playersInWorld.map(p => p.id === playerId ? { ...p, position } : p)
+        }));
+    },
+
+    addPlayer: (player) => {
+        set(state => ({ playersInWorld: [...state.playersInWorld, player] }));
+    },
+
+    removePlayer: (playerId) => {
+        set(state => ({ playersInWorld: state.playersInWorld.filter(p => p.id !== playerId) }));
+    },
+}));
+
+// -- src/App.tsx
+// ... (imports from previous steps)
+const OpenWorldPage = React.lazy(() => import('./pages/OpenWorldPage'));
+const WorldInstancePage = React.lazy(() => import('./pages/WorldInstancePage'));
+
+// ... (existing App component structure)
+// Add new protected routes inside the <ProtectedRoute> element
+<Route element={<ProtectedRoute />}>
+    <Route path="/" element={<HomePage />} />
+    <Route path="/open-world" element={<OpenWorldPage />} />
+    <Route path="/open-world/:worldId" element={<WorldInstancePage />} />
+</Route>
+// ...
+
+// -- src/components/chat/Sidebar.tsx
+// ... (imports)
+import { useNavigate } from 'react-router-dom';
+
+// ... (Sidebar and ChatList components)
+const UserMenu: React.FC<SidebarProps> = ({ onNewChat, onSettings }) => {
+  const navigate = useNavigate();
+  // ... (rest of UserMenu component)
+  
+  return (
+    <div /* ... */>
+      {/* ... */}
+      <TooltipProvider delayDuration={100}>
+        <div className="flex items-center">
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={() => navigate('/open-world')}>
+                        <Globe className="h-5 w-5" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Open World</p></TooltipContent>
+            </Tooltip>
+            {/* ... other icons ... */}
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+};
+
+// -- src/components/world/WorldCard.tsx
+import * as React from 'react';
+import type { OpenWorld } from '@/types';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { Button } from '../ui/Button';
+import { Users } from 'lucide-react';
+
+interface WorldCardProps {
+    world: OpenWorld;
+    onJoin: (world: OpenWorld) => void;
+}
+
+export const WorldCard: React.FC<WorldCardProps> = ({ world, onJoin }) => {
+    return (
+        <Card className="flex flex-col">
+            <CardHeader className="p-0">
+                <img src={world.imageUrl} alt={world.name} className="rounded-t-lg aspect-video object-cover" />
+            </CardHeader>
+            <CardContent className="p-4 flex-1">
+                <CardTitle className="text-xl mb-1">{world.name}</CardTitle>
+                <CardDescription>{world.description}</CardDescription>
+            </CardContent>
+            <CardFooter className="p-4 flex justify-between items-center">
+                <div className="flex items-center text-sm text-text-secondary">
+                    <Users className="h-4 w-4 mr-2" /> {world.population}
+                </div>
+                <Button onClick={() => onJoin(world)}>Join World</Button>
+            </CardFooter>
+        </Card>
+    );
+};
+
+// -- src/components/world/JoinWorldDialog.tsx
+import * as React from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/Dialog';
+import { Input } from '../ui/Input';
+import { Button } from '../ui/Button';
+import { useWorldStore } from '@/store/worldStore';
+import type { OpenWorld } from '@/types';
+import { useNavigate } from 'react-router-dom';
+
+interface JoinWorldDialogProps {
+    world: OpenWorld | null;
+    onOpenChange: (isOpen: boolean) => void;
+}
+
+export const JoinWorldDialog: React.FC<JoinWorldDialogProps> = ({ world, onOpenChange }) => {
+    const { joinWorld, isJoiningWorld, error } = useWorldStore();
+    const [password, setPassword] = React.useState('');
+    const navigate = useNavigate();
+
+    const handleJoin = async () => {
+        if (!world) return;
+        const success = await joinWorld(world.id, password);
+        if (success) {
+            onOpenChange(false);
+            navigate(`/open-world/${world.id}`);
+        }
+    };
+
+    return (
+        <Dialog open={!!world} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Join "{world?.name}"</DialogTitle>
+                    <DialogDescription>This world is password protected. Please enter the password to join.</DialogDescription>
+                </DialogHeader>
+                <div className="space-y-2">
+                    <Input
+                        type="password"
+                        placeholder="World Password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        disabled={isJoiningWorld}
+                    />
+                    {error && <p className="text-sm text-status-error">{error}</p>}
+                </div>
+                <DialogFooter>
+                    <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+                    <Button onClick={handleJoin} disabled={isJoiningWorld}>
+                        {isJoiningWorld ? 'Joining...' : 'Join'}
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+};
+
+// -- src/pages/OpenWorldPage.tsx
+import * as React from 'react';
+import { useWorldStore } from '@/store/worldStore';
+import { WorldCard } from '@/components/world/WorldCard';
+import { Skeleton } from '@/components/ui/Skeleton';
+import type { OpenWorld } from '@/types';
+import { JoinWorldDialog } from '@/components/world/JoinWorldDialog';
+import { useNavigate } from 'react-router-dom';
+
+const OpenWorldPage: React.FC = () => {
+    const { openWorlds, isLoadingWorlds, fetchOpenWorlds, joinWorld } = useWorldStore();
+    const [selectedWorld, setSelectedWorld] = React.useState<OpenWorld | null>(null);
+    const navigate = useNavigate();
+
+    React.useEffect(() => {
+        fetchOpenWorlds();
+    }, [fetchOpenWorlds]);
+
+    const handleJoinClick = async (world: OpenWorld) => {
+        if (world.isPasswordProtected) {
+            setSelectedWorld(world);
+        } else {
+            const success = await joinWorld(world.id);
+            if (success) {
+                navigate(`/open-world/${world.id}`);
+            }
+        }
+    };
+
+    return (
+        <div className="p-8 bg-background-secondary min-h-screen">
+            <h1 className="text-4xl font-heading mb-6 text-text-primary">Open Worlds</h1>
+            {isLoadingWorlds ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-80 w-full" />)}
+                </div>
+            ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {openWorlds.map(world => (
+                        <WorldCard key={world.id} world={world} onJoin={handleJoinClick} />
+                    ))}
+                </div>
+            )}
+            <JoinWorldDialog world={selectedWorld} onOpenChange={() => setSelectedWorld(null)} />
+        </div>
+    );
+};
+
+export default OpenWorldPage;
+
+// -- src/pages/WorldInstancePage.tsx
+import * as React from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useWorldStore } from '@/store/worldStore';
+import { WorldCanvas } from '@/components/world/WorldCanvas';
+import { Spinner } from '@/components/ui/Spinner';
+import { Button } from '@/components/ui/Button';
+import { ArrowLeft } from 'lucide-react';
+import { startWorldSimulation, stopWorldSimulation } from '@/lib/simulation';
+
+const WorldInstancePage: React.FC = () => {
+    const { worldId } = useParams<{ worldId: string }>();
+    const navigate = useNavigate();
+    const { currentWorld, playersInWorld, leaveWorld, addPlayer, updatePlayerPosition } = useWorldStore();
+
+    React.useEffect(() => {
+        if (!worldId) navigate('/open-world');
+
+        // Start simulation when entering a world
+        if (worldId) {
+             startWorldSimulation(
+                worldId,
+                (wId, player) => addPlayer(player),
+                (wId, playerId, pos) => updatePlayerPosition(playerId, pos),
+                (wId, playerId) => {} // removePlayer not fully implemented in this step
+            );
+        }
+        
+        return () => {
+            // Stop simulation and leave world on component unmount
+            stopWorldSimulation();
+            leaveWorld();
+        };
+    }, [worldId, navigate, leaveWorld, addPlayer, updatePlayerPosition]);
+
+    if (!currentWorld || currentWorld.id !== worldId) {
+        return <div className="h-screen w-full flex items-center justify-center bg-black"><Spinner /></div>;
+    }
+
+    return (
+        <div className="h-screen w-full bg-black relative">
+            <Button
+                variant="ghost"
+                className="absolute top-4 left-4 z-10 text-white bg-black/50 hover:bg-black/80 hover:text-white"
+                onClick={() => navigate('/open-world')}
+            >
+                <ArrowLeft className="mr-2 h-4 w-4" /> Back to Worlds
+            </Button>
+            <WorldCanvas players={playersInWorld} />
+        </div>
+    );
+};
+
+export default WorldInstancePage;
+
+
+// -- src/components/world/WorldCanvas.tsx
+import * as React from 'react';
+import type { Player } from '@/types';
+import { useAuthStore } from '@/store/authStore';
+import { useWorldStore } from '@/store/worldStore';
+
+interface WorldCanvasProps {
+    players: Player[];
+}
+
+export const WorldCanvas: React.FC<WorldCanvasProps> = ({ players }) => {
+    const canvasRef = React.useRef<HTMLCanvasElement>(null);
+    const { currentUser } = useAuthStore();
+    const { updatePlayerPosition } = useWorldStore();
+    
+    // Movement state
+    const keysPressed = React.useRef<{ [key: string]: boolean }>({});
+
+    React.useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const handleKeyDown = (e: KeyboardEvent) => { keysPressed.current[e.key.toLowerCase()] = true; };
+        const handleKeyUp = (e: KeyboardEvent) => { keysPressed.current[e.key.toLowerCase()] = false; };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        
+        let animationFrameId: number;
+
+        const render = () => {
+            // Resize canvas to fit window
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Update current player position
+            if (currentUser) {
+                const me = players.find(p => p.id === currentUser.id);
+                if (me) {
+                    let { x, y } = me.position;
+                    const speed = 3;
+                    if (keysPressed.current['w'] || keysPressed.current['arrowup']) y -= speed;
+                    if (keysPressed.current['s'] || keysPressed.current['arrowdown']) y += speed;
+                    if (keysPressed.current['a'] || keysPressed.current['arrowleft']) x -= speed;
+                    if (keysPressed.current['d'] || keysPressed.current['arrowright']) x += speed;
+                    
+                    if (x !== me.position.x || y !== me.position.y) {
+                        updatePlayerPosition(currentUser.id, { x, y });
+                    }
+                }
+            }
+            
+            // Draw all players
+            players.forEach(player => {
+                // Draw circle
+                ctx.beginPath();
+                ctx.arc(player.position.x, player.position.y, 15, 0, 2 * Math.PI);
+                ctx.fillStyle = player.id === currentUser?.id ? 'blue' : 'red';
+                ctx.fill();
+                ctx.closePath();
+
+                // Draw name
+                ctx.fillStyle = 'white';
+                ctx.textAlign = 'center';
+                ctx.font = '12px Open Sans';
+                ctx.fillText(player.name, player.position.x, player.position.y - 20);
+            });
+
+            animationFrameId = window.requestAnimationFrame(render);
+        };
+        render();
+
+        return () => {
+            window.cancelAnimationFrame(animationFrameId);
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+        };
+    }, [players, currentUser, updatePlayerPosition]);
+
+    return <canvas ref={canvasRef} className="w-full h-full" />;
+};
